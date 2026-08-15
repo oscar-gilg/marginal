@@ -1,0 +1,73 @@
+# Copy to ./marginal.toml, or to ~/.config/marginal/config.toml.
+# Later wins: user config, then local, then --config, then a CLI flag.
+# `marginal config` prints what a run here would actually use.
+#
+# Four independent choices, deliberately four different words — three of them used
+# to share the word "mode", which made every sentence about them ambiguous:
+#
+#   mode      who WRITES the comments                (api | agent)
+#   source    where the document TEXT is read from   (api | browser)
+#   schedule  how the stages are OVERLAPPED          (async | sync)
+#   provider  which route reaches the MODEL          (auto | anthropic | openrouter)
+#
+# `mode = "api"` and `source = "api"` are unrelated — the first is who writes the
+# comments, the second is where the text is read from, and any combination of the
+# two works.
+
+mode = "api"               # api: this tool calls a model. agent: a coding agent
+                           # writes and hands back a batch. `comment` runs whichever.
+model = "claude-fable-5"
+provider = "auto"          # caching and effort work on both routes
+# effort = "high"          # low | medium | high | xhigh | max. Unset: provider default
+comments = 5               # budget per run; a cap, not a target
+source = "api"             # browser needs no Google credentials at all
+schedule = "async"         # async: write the next comment while this one posts
+                           # sync: one comment start to finish, then the next
+
+# --- the editing pass ---
+# A second model shortens each comment. It may only cut, so lowering the band is
+# what shortens comments; raising it only stops them being cut.
+critic = true
+critic_model = "claude-opus-5"
+critic_effort = "medium"
+critic_workers = 4         # concurrent edits in flight
+min_words = 20
+max_words = 60
+word_ceiling = 80          # reported when exceeded, never enforced
+
+# --- looking things up ---
+# Let the commenter search the web while it reads. Off by default: a comment is
+# about the document's own reasoning, and a commenter that can search will
+# sometimes spend one telling the author what the literature says instead. Worth
+# turning on for a document that leans on external facts — cited results, numbers
+# attributed to someone else, a claim about how a standard behaves.
+#
+# Both modes get the same instruction about when a search is worth making; only
+# the mechanism differs. API mode passes Anthropic's server-side web search tool,
+# agent mode tells the coding agent to use whatever search it already has.
+# Unavailable on `schedule = "batch"`, which has no tool loop to search in; a run
+# there says so rather than quietly reviewing without it.
+web_search = false
+# Searches per turn. Applies on the direct Anthropic route only — OpenRouter's
+# `web` plugin caps results per search instead, with no per-request equivalent,
+# and every run prints which of the two it got.
+web_search_max_uses = 5
+
+# --- browser ---
+port = 9222
+profile = ".chrome-profile"
+headless = false           # sign in headful once, then reuse the profile
+strategy = "paragraph"     # paragraph: jump by paragraph. chars: one key per character
+
+# --- identity ---
+# `marginal auth --account NAME --client CLIENT.json` first. A separate account
+# keeps the model's comments distinct from yours; sign the browser profile into it
+# too and share the document with it as Commenter.
+# account = "bot@example.com"
+
+[prompts]
+# The setting most worth changing. Bump the version rather than editing in place, so
+# a run can be tied to the prompt that produced it. See prompts/README.md.
+commenter = "prompts/commenter-v2.md"   # what to say
+critique = "prompts/critique-v1.md"     # how short to say it; both modes
+respond = "prompts/respond-v1.md"       # replies in a thread

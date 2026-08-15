@@ -1,0 +1,57 @@
+# Publish to PyPI when a version tag is pushed.
+#
+# Trusted publishing, so there is no API token in this repository's secrets: PyPI
+# is configured to trust this workflow, in this repository, and mints a short-lived
+# credential for the run. Setting it up is one form on PyPI (project
+# `marginal`, owner `oscar-gilg`, repository `Marginal`, workflow
+# `publish.yml`, environment `pypi`) and is the only manual step.
+#
+# The tag is the trigger, but `pyproject.toml` is the source of the version. They
+# are checked against each other before anything is built, because a tag that
+# disagrees with the metadata publishes a version nobody named — and PyPI will not
+# let it be replaced afterwards.
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: The tag and the metadata must name the same version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          meta=$(uv run --no-project python -c \
+            'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          if [ "$tag" != "$meta" ]; then
+            echo "tag $GITHUB_REF_NAME says $tag, pyproject.toml says $meta" >&2
+            exit 1
+          fi
+
+      - name: Tests
+        run: PYTHONPATH=$PWD/src uv run --with pytest python -m pytest -q
+
+      - run: uv build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # what trusted publishing mints the credential from
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -1,0 +1,11 @@
+{
+  "name": "marginal",
+  "owner": { "name": "oscar-gilg" },
+  "plugins": [
+    {
+      "name": "marginal",
+      "source": "./",
+      "description": "Read a Google Doc, leave real anchored comments in it, and answer the replies"
+    }
+  ]
+}

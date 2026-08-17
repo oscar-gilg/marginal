@@ -31,6 +31,7 @@ docs.google.com rather than a sign-in page, and it says which one it made.
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -151,9 +152,9 @@ def _signed_in_shallow(port: int) -> Check:
             "Google session",
             False,
             "docs.google.com redirected to a sign-in page",
-            fix="Sign in to Google in the Chrome window that just opened, then run "
-            "`marginal setup` again. This profile keeps its session, so this "
-            "is a one-time step.",
+            fix=f"Sign in to Google in the Chrome window that just opened, then run "
+            f"`{invocation()} setup` again. This profile keeps its session, so "
+            f"this is a one-time step.",
         )
     return Check(
         "Google session",
@@ -270,7 +271,8 @@ def google_accounts(account: str | None = None) -> tuple[Check, list[str]]:
             "no accounts — optional",
             fix="Without it, the document is read and verified through the browser "
             "session instead, and `list`, `reply`, `respond` and `unpost` are "
-            "unavailable. `marginal auth --account you@example.com` adds it in one "
+            "unavailable. `" + invocation() + " auth --client CLIENT.json --account you" +
+            "@example.com` adds it in one "
             "step — this build ships an OAuth client, so there is no Google Cloud "
             "project to create.",
         ),
@@ -397,7 +399,7 @@ def run(
 
     print()
     if not signed_in:
-        print("Sign in to Google in the Chrome window, then run `marginal setup` again.")
+        print(f"Sign in to Google in the Chrome window, then run `{invocation()} setup` again.")
         return 1
     print(_next_step(doc_url, keys, accounts))
     return 0
@@ -413,12 +415,12 @@ NEEDS_OAUTH = ("read", "list", "post", "reply", "unpost", "respond")
 def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str:
     doc = doc_url or "<doc-url>"
     if keys:
-        first = f"Ready. Try:  marginal comment {doc} -n 3"
+        first = f"Ready. Try:  {invocation()} comment {doc} -n 3"
     else:
         first = (
             f"Ready, in agent mode. Ask your coding agent to run:\n"
-            f"  marginal comment {doc} -n 3      # prints the brief and the document\n"
-            f"and to post what it writes back with `marginal post-batch`."
+            f"  {invocation()} comment {doc} -n 3      # prints the brief and the document\n"
+            f"and to post what it writes back with `{invocation()} post-batch`."
         )
     if accounts:
         # Already authenticated, so the long explanation is behind them. One line,
@@ -466,7 +468,7 @@ def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str
             # from the console minutes ago. Naming it turns "supply a client" into
             # a line to copy.
             lines += [
-                f"  marginal auth --client {candidates[0]} --account you@example.com",
+                f"  {invocation()} auth --client {candidates[0]} --account you@example.com",
                 "",
             ]
             if len(candidates) > 1:
@@ -479,7 +481,7 @@ def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str
                 ) + [""]
         else:
             lines += [
-                "  marginal auth --client /path/to/client_secret.json --account you@example.com",
+                f"  {invocation()} auth --client /path/to/client_secret.json --account you@example.com",
                 "",
             ]
         lines += _wrap(
@@ -503,6 +505,17 @@ def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str
             2,
         )
     return "\n".join(lines)
+
+
+def invocation() -> str:
+    """How to spell this program in a command a user can paste.
+
+    `uvx marginal` installs nothing, which is the point of recommending it — and
+    means `marginal` is then not on PATH. Printing bare `marginal auth ...` to
+    somebody who got here that way hands them a command that fails with
+    "command not found", which reads as a broken tool rather than a missing install.
+    """
+    return "marginal" if shutil.which("marginal") else "uvx marginal"
 
 
 def _bundled_client_in_use() -> bool:

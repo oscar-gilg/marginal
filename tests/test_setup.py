@@ -474,3 +474,23 @@ def test_nothing_about_identity_before_oauth_exists(monkeypatch):
     monkeypatch.setattr(setup, "CLIENT_HUNTING_GROUND", ())
     out = setup._next_step(None, keys=["K"], accounts=[])
     assert "answer as another" not in out
+
+
+def test_printed_commands_are_runnable_as_printed(monkeypatch):
+    # `uvx marginal` installs nothing — that is why it is recommended — so `marginal`
+    # is then not on PATH. Printing bare `marginal auth ...` to someone who got here
+    # that way hands them a command that fails with "command not found", which reads
+    # as a broken tool rather than a missing install.
+    monkeypatch.setattr(setup.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(setup.auth, "client_source", lambda: None)
+    monkeypatch.setattr(setup, "CLIENT_HUNTING_GROUND", ())
+    out = setup._next_step(None, keys=["K"], accounts=[])
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("marginal "):
+            raise AssertionError(f"not runnable without an install: {stripped!r}")
+    assert "uvx marginal" in out
+
+    monkeypatch.setattr(setup.shutil, "which", lambda _n: "/usr/local/bin/marginal")
+    on_path = setup._next_step(None, keys=["K"], accounts=[])
+    assert "uvx marginal" not in on_path, "should not prefix uvx when it is installed"

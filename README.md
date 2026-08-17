@@ -201,8 +201,11 @@ to get one:
 - **Somebody sent you theirs.** If you were given a `client_secret_….json` along
   with this tool, that is it — pass it to `--client` once and it is copied to
   `~/.config/marginal/` and used from then on.
-- **Make your own**, which takes about ten minutes and is the only option if
-  nobody handed you a file. Create a Google Cloud project, enable the Docs and
+- **Ask for it.** If you were handed marginal by someone and no client came with
+  it, ask them: sending the file costs them nothing and saves you the console
+  entirely. This is how it is meant to spread at small scale, and it is the option
+  people overlook because it means asking rather than doing.
+- **Make your own**, which takes about ten minutes. Create a Google Cloud project, enable the Docs and
   Drive APIs, configure the consent screen, and create a
   [**Desktop app** OAuth client](https://developers.google.com/identity/protocols/oauth2/native-app).
   The `/marginal:oauth` skill walks through it, or see below.

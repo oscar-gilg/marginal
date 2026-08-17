@@ -422,13 +422,16 @@ def test_an_authenticated_user_on_their_own_client_is_told_nothing(monkeypatch):
     assert "shipped with marginal" not in out
 
 
-def test_no_client_at_all_says_where_one_comes_from(monkeypatch):
-    # With nothing shipped, "run marginal auth" is not actionable on its own: the
-    # user needs to know a client is a file they were either given or must make.
+def test_no_client_at_all_names_all_three_ways_to_get_one(monkeypatch):
+    # With nothing shipped, "run marginal auth" is not actionable on its own. All
+    # three routes matter, and asking is the one people overlook — it is the only
+    # one that involves waiting on someone else rather than doing something.
     monkeypatch.setattr(setup.auth, "client_source", lambda: None)
     out = setup._next_step(None, keys=["K"], accounts=[])
     assert "--client" in out
-    assert "sent you" in out and "/marginal:oauth" in out
+    assert "were sent" in out, "the file may already be in hand"
+    assert "ask whoever" in out, "asking is the cheapest route and the least obvious"
+    assert "/marginal:oauth" in out, "and making your own must stay available"
 
 
 def test_a_client_lying_around_is_named_in_the_command(monkeypatch, tmp_path):

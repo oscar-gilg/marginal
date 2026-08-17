@@ -94,20 +94,26 @@ path to a client file if it found one lying around. Use what it printed rather t
 composing your own — it searched `private/`, the working directory and
 `~/Downloads`, and it names the newest, which is usually the one just handed over.
 
-Two ways they get a client, and it is worth asking which applies:
+Three ways they get one, and it is worth asking which applies:
 
 > A Google OAuth client is a file that identifies this application to Google, and
 > marginal does not ship one. If whoever sent you marginal also sent a
-> `client_secret_….json`, that is it. If not, making your own takes about ten
-> minutes in the Google Cloud console and it is yours — your own quota, your own
-> project.
+> `client_secret_….json`, that is it. If they did not, ask them — it costs them
+> nothing to send and saves you the setup. Failing that, making your own takes
+> about ten minutes in the Google Cloud console and it is yours: your own quota,
+> your own project.
 
 - **They have a file** → the command setup printed. They run it themselves: it
   opens a browser and takes longer than an automated shell allows. Quote the path;
   never glob it, since `client_secret_*.json` expands to every client they have
   ever downloaded and the extra one becomes a positional argument.
-- **They do not** → `/marginal:oauth`.
-- **Neither, for now** → say so and move on. Commenting is the main thing.
+- **They could ask for one** → say so explicitly. Someone who was handed this tool
+  by a colleague will usually get a client from the same person faster than they
+  will create a Google Cloud project, and it is the option people do not think of
+  because it involves asking rather than doing.
+- **They want their own** → `/marginal:oauth`.
+- **None of the above, for now** → say so and move on. Commenting is the main
+  thing and it needs none of this.
 
 Warn them once about the consent screen, so it does not look like a failure:
 **"Google hasn't verified this app"** is expected for a client nobody has submitted

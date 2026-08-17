@@ -486,10 +486,11 @@ def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str
             ]
         lines += _wrap(
             "A Google OAuth client identifies the application to Google, and none "
-            "ships with marginal. If somebody sent you a client_secret JSON along "
-            "with this tool, that is the file. Otherwise /marginal:oauth walks "
-            "through making your own, which takes about ten minutes and is yours to "
-            "keep.",
+            "ships with marginal. Three ways to have one: you were sent a "
+            "client_secret JSON along with this tool, in which case that is the "
+            "file; you ask whoever gave you marginal to send theirs, which costs "
+            "them nothing and is the usual answer; or /marginal:oauth walks through "
+            "making your own, which takes about ten minutes and is yours to keep.",
             2,
         )
     elif _bundled_client_in_use():

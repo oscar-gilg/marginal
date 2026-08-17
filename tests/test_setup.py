@@ -402,10 +402,21 @@ def test_a_client_of_your_own_prompts_nothing(monkeypatch):
     assert "shipped with marginal" not in out
 
 
-def test_nothing_is_said_about_clients_once_oauth_is_working(monkeypatch):
-    # `accounts` non-empty means they have already authenticated. The decision is
-    # behind them; repeating it is the kind of advice that trains people to skim.
+def test_an_authenticated_user_gets_one_line_not_the_explanation(monkeypatch):
+    # Having a token is not the same as having chosen whose project it is on:
+    # anyone who authenticated before the client shipped never saw the question.
+    # So it is still named — once, briefly — rather than repeated in full, which is
+    # the kind of advice that trains people to skim.
     monkeypatch.setattr(setup.auth, "client_source", lambda: (Path("/pkg/oauth.json"), "bundled"))
     out = setup._next_step(None, keys=["K"], accounts=["me@example.com"])
+    assert "shipped with marginal" in out
+    assert "100-user cap" not in out, "the full explanation is for people still deciding"
+    assert len(out.splitlines()) < 8
+
+
+def test_an_authenticated_user_on_their_own_client_is_told_nothing(monkeypatch):
+    monkeypatch.setattr(
+        setup.auth, "client_source", lambda: (Path("~/.config/marginal/x.json"), "your own")
+    )
+    out = setup._next_step(None, keys=["K"], accounts=["me@example.com"])
     assert "shipped with marginal" not in out
-    assert "marginal auth" not in out

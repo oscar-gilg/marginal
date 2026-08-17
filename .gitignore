@@ -11,3 +11,4 @@ dist/
 marginal.toml
 # Agent-harness configuration: local, and not something to publish.
 .codex/
+.DS_Store

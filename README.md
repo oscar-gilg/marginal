@@ -190,14 +190,16 @@ marginal chrome       # sign this Chrome profile into the same account
 That is the whole of it. marginal ships an OAuth client, so there is no Google
 Cloud project to create, no APIs to enable and no consent screen to configure.
 
-**What you are agreeing to.** The consent screen will say the app is not verified
-by Google and *"may stop working soon"*, name the developer as the address that
-owns the client rather than you, and describe the access in Google's blunt terms:
-*see, edit, create, and delete all of your Google Drive files*. All of that is
-accurate. marginal needs write access to a document's comments, and Drive's
-comments API cannot reach a document the app did not itself create, so the
-narrower `drive.file` scope will not do. The token is yours and stays on your
-machine under `~/.config/marginal/`; nothing is sent anywhere but Google.
+**What you are agreeing to.** The consent screen says the app is not verified by
+Google and *"may stop working soon"*, names the developer as the address that owns
+the client rather than you, and describes the access in Google's blunt terms: *see,
+edit, create, and delete all of your Google Drive files*. All of that is accurate.
+The narrower `drive.file` scope will not do: it reaches only files the app created
+or that the user hands it through a picker, and marginal starts from the URL of a
+document that already exists. Your token stays on your machine under
+`~/.config/marginal/` with private permissions; nothing is sent anywhere but
+Google. The client itself is not private and does not need to be — it ships in the
+package, world-readable, which is what RFC 8252 means by a public client.
 
 **Three consequences of a shipped client**, none of them hidden:
 
@@ -205,7 +207,7 @@ machine under `~/.config/marginal/`; nothing is sent anywhere but Google.
   other user of it.
 - Unverified apps are capped at 100 authorized users, after which new ones fail.
 - If Google ever requires verification of that client, it stops working for
-  everyone at once. This is what "may stop working soon" refers to.
+  everyone at once.
 
 **Use your own project instead** — recommended if you rely on this, and the way
 around all three. Create a Google Cloud project, enable the Docs and Drive APIs,
@@ -222,19 +224,21 @@ there is no setting to remember, because the file's presence is the preference.
 `marginal config` prints which client a run would use, so whose project you are on
 is never something to deduce.
 
-Two things worth knowing if you do run your own. **Leave the consent screen in
-Testing and add yourself as a test user**, or publish it — either works, but an
-app that is neither published nor lists you as a test user is
-[blocked outright](https://support.google.com/cloud/answer/7454865?hl=en) with
-"has not completed the Google verification process". And **a consent screen left
-in Testing expires its refresh tokens after seven days**, so you re-run
-`marginal auth` weekly; publishing avoids that.
+Two things worth knowing if you do run your own. **The consent screen must be
+either published or list you as a test user.** Being neither is refused with
+"has not completed the Google verification process", which reads like a
+verification problem and is really an access-list one. Both routes work — that an
+unverified *published* app still lets people through was confirmed by trying it
+with an account that was neither the owner nor a test user. And **an app left in
+Testing expires its refresh tokens after seven days** for scopes like these, so
+you would re-run `marginal auth` weekly; publishing avoids that.
 
 marginal owns its OAuth tokens and does not discover or modify another tool's
 credential store.
 
-The client and tokens are stored under `~/.config/marginal/` with private file
-permissions. The first account becomes the default. With several accounts, select
+Tokens, and any client you install with `--client`, are stored under
+`~/.config/marginal/` with private file permissions. A bundled client is not: it
+lives in the installed package and is world-readable, because it is public. The first account becomes the default. With several accounts, select
 one per command or set the default explicitly:
 
 ```bash

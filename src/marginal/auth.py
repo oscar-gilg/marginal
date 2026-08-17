@@ -26,9 +26,10 @@ from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config/marginal"
 CLIENT_PATH = CONFIG_DIR / "oauth-client.json"
-# The client shipped with the package, if this build has one. Beside the prompts,
-# by the same force-include, so an installed copy carries it and a checkout does
-# not have to. Absent is a supported state: `_client` then says how to supply one.
+# The client shipped with the package, if this build has one. Inside the package
+# directory, so ordinary package selection carries it into both the wheel and the
+# sdist — no force-include, unlike the prompts, which live outside `src/`. Absent
+# is a supported state: `_client` then says how to supply one.
 BUNDLED_CLIENT = Path(__file__).resolve().parent / "oauth-client.json"
 AUTH_PATH = CONFIG_DIR / "auth.json"
 ACCOUNTS_DIR = CONFIG_DIR / "accounts"
@@ -158,11 +159,33 @@ def _installed(raw: dict, where: str = "") -> dict:
     """
     installed = raw.get("installed")
     required = ("client_id", "client_secret", "auth_uri", "token_uri")
-    if not isinstance(installed, dict) or any(not installed.get(k) for k in required):
+    if not isinstance(installed, dict) or any(
+        not isinstance(installed.get(k), str) or not installed[k] for k in required
+    ):
         raise AuthError(
             f"OAuth client{where} must be a Google Desktop app JSON with an "
             f"'installed' object containing {', '.join(required)}"
         )
+    # Where the endpoints point is not cosmetic: `auth_uri` is where the user is
+    # sent to approve, and `token_uri` is where this process posts the client
+    # secret, the authorization code and the PKCE verifier. A client file naming
+    # somewhere else turns `--client` into "hand your Google session to whoever
+    # wrote this JSON", and the file may have come from a gist or a chat message.
+    for field in ("auth_uri", "token_uri"):
+        parsed = urllib.parse.urlparse(installed[field])
+        host = parsed.hostname or ""
+        # Both domains, because Google uses both and a rule that allows only the
+        # obvious one rejects Google's own client: `accounts.google.com` issues the
+        # authorization, `oauth2.googleapis.com` mints the token.
+        google = any(
+            host == d or host.endswith("." + d) for d in ("google.com", "googleapis.com")
+        )
+        if parsed.scheme != "https" or not google:
+            raise AuthError(
+                f"OAuth client{where} has a {field} of {installed[field]!r}, which is "
+                f"not an https Google endpoint. Refusing to use it: that is where your "
+                f"authorization and this client's secret would be sent."
+            )
     return installed
 
 
@@ -258,8 +281,7 @@ def select_account(account: str | None = None) -> str:
         return accounts[0]
     if not accounts:
         raise AuthError(
-            "not authenticated with Google; download a Desktop OAuth client, then run: "
-            "marginal auth --client /path/to/client_secret.json --account NAME"
+            "not authenticated with Google; run: marginal auth --account NAME"
         )
     raise AuthError(
         "more than one Google account is authenticated; pass --account NAME or set one "
@@ -280,8 +302,7 @@ def _post_form(url: str, fields: dict[str, str]) -> dict:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
             raw = response.read()
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")
-        raise AuthError(f"Google OAuth returned HTTP {e.code}: {detail}") from e
+        raise AuthError(f"Google OAuth returned HTTP {e.code}: {_why(e.read())}") from e
     except (OSError, urllib.error.URLError) as e:
         raise AuthError(f"could not reach Google OAuth: {e}") from e
     try:
@@ -289,8 +310,32 @@ def _post_form(url: str, fields: dict[str, str]) -> dict:
     except json.JSONDecodeError as e:
         raise AuthError("Google OAuth returned invalid JSON") from e
     if not isinstance(value, dict) or value.get("error"):
-        raise AuthError(f"Google OAuth failed: {value}")
+        raise AuthError(f"Google OAuth failed: {_why(value)}")
     return value
+
+
+def _why(payload) -> str:
+    """The reason out of an OAuth error, without the rest of the response.
+
+    This runs on the endpoint that mints tokens, and its output goes to a terminal
+    and from there into bug reports and pasted logs. Echoing a whole response body
+    means one malformed or unexpected reply puts a refresh token somewhere it will
+    outlive the process. Only the two fields the spec defines for saying what went
+    wrong come out; anything else is reported as its shape.
+    """
+    if isinstance(payload, (bytes, bytearray)):
+        try:
+            payload = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return f"<{len(payload)} bytes, not JSON>"
+    if not isinstance(payload, dict):
+        return f"<{type(payload).__name__}>"
+    error = payload.get("error")
+    if isinstance(error, dict):  # the Google-API shape rather than the OAuth one
+        error = error.get("status") or error.get("message")
+    described = payload.get("error_description")
+    out = " — ".join(str(p) for p in (error, described) if p)
+    return out or f"<no error field; keys: {sorted(payload)}>"
 
 
 def access_token(account: str | None = None) -> str:
@@ -370,6 +415,47 @@ def _callback_values(url: str, state: str) -> str:
     return code
 
 
+def authenticated_identity(access_token: str) -> str | None:
+    """Which Google account a token actually belongs to, or None if unanswerable.
+
+    Asked of Drive, because the Drive scope is already granted and no extra one has
+    to be requested to find out who is holding the token.
+    """
+    req = urllib.request.Request(
+        "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
+        headers={"authorization": f"Bearer {access_token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+            return json.loads(response.read()).get("user", {}).get("emailAddress")
+    except Exception:
+        # An identity we could not check is not an identity that failed the check.
+        # Refusing here would turn a transient Drive error into a failed login.
+        return None
+
+
+def _refuse_a_mismatched_identity(account: str, access_token: str | None) -> None:
+    """Stop a token being filed under an account it does not belong to.
+
+    `login_hint` only *suggests* an account to Google. Someone signed into two
+    accounts can pick the other one at the chooser, and the token would then be
+    stored under the name that was asked for rather than the one that was granted.
+    Nothing downstream would notice: comments would post and replies would come back
+    as a different person, which on a shared document is the kind of mistake that
+    cannot be taken back.
+    """
+    if not access_token:
+        return
+    actual = authenticated_identity(access_token)
+    if actual and actual.lower() != account.lower():
+        raise AuthError(
+            f"asked to authenticate {account!r} but Google granted access as "
+            f"{actual!r}. Nothing has been saved. Re-run with --account {actual}, or "
+            f"sign out of the other account and try again — a token filed under the "
+            f"wrong name posts comments as the wrong person."
+        )
+
+
 def authorize(account: str, client_path: Path | None = None, no_browser: bool = False) -> None:
     """Run Google's installed-app loopback flow and store a named refresh token."""
     account = _validate_account(account)
@@ -386,9 +472,34 @@ def authorize(account: str, client_path: Path | None = None, no_browser: bool = 
     callback: dict[str, str] = {}
 
     class Handler(BaseHTTPRequestHandler):
+        """Accept Google's redirect, and only Google's redirect.
+
+        Anything on this port that is not the callback is ignored and the server
+        keeps waiting. Taking the first request that arrived meant a favicon fetch,
+        a probe, or a stray tab could end the wait — and then authentication failed
+        with a message about a missing code rather than about what actually
+        happened. A page that knows the port could end it deliberately.
+
+        The success page is written *after* the callback parses, so "Marginal is
+        authenticated" is never shown for a request that authenticated nothing.
+        """
+
         def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's API
-            callback["url"] = f"http://127.0.0.1{self.path}"
-            body = b"Marginal is authenticated. You can close this tab."
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path not in ("/", ""):
+                self.send_error(404)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            if not ({"code", "error"} & set(query)):
+                self.send_error(400, "not an OAuth callback")
+                return
+            try:
+                callback["code"] = _callback_values(f"http://127.0.0.1{self.path}", state)
+            except AuthError as e:
+                callback["error"] = str(e)
+                body = b"Authentication failed. Return to the terminal for the reason."
+            else:
+                body = b"Marginal is authenticated. You can close this tab."
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -429,16 +540,23 @@ def authorize(account: str, client_path: Path | None = None, no_browser: bool = 
         else:
             if not webbrowser.open(url):
                 print(f"Open this URL in a browser:\n\n{url}\n", file=sys.stderr)
-            server.handle_request()
-            if "url" not in callback:
+            # Keep serving until the callback arrives or the clock runs out, rather
+            # than until *a* request arrives. `handle_request` honours the timeout
+            # per call, so this loop is bounded by the same deadline it always was.
+            deadline = time.time() + CALLBACK_TIMEOUT
+            while not callback and time.time() < deadline:
+                server.handle_request()
+            if "error" in callback:
+                raise AuthError(callback["error"])
+            if "code" not in callback:
                 raise AuthError(
                     f"no OAuth callback within {CALLBACK_TIMEOUT}s. If the browser showed "
-                    "\"Access blocked: ... has not completed the Google verification "
-                    "process\", the consent screen is published rather than in Testing: "
-                    "an unverified external app asking for a restricted scope is refused "
-                    "outright. Set it back to Testing and add this account as a test user."
+                    '"Access blocked: ... has not completed the Google verification '
+                    'process", the consent screen is neither published nor lists this '
+                    "account as a test user — an external app must be one or the other. "
+                    "Publish it, or add this account under Test users."
                 )
-            code = _callback_values(callback["url"], state)
+            code = callback["code"]
     finally:
         if server is not None:
             server.server_close()
@@ -459,6 +577,7 @@ def authorize(account: str, client_path: Path | None = None, no_browser: bool = 
         raise AuthError(
             "Google returned no refresh token; revoke the app grant and authenticate again"
         )
+    _refuse_a_mismatched_identity(account, token.get("access_token"))
     token["expires_at"] = time.time() + int(token.get("expires_in", 3600))
     _write_private(_token_path(account), json.dumps(token, indent=2) + "\n")
     if default_account() is None:

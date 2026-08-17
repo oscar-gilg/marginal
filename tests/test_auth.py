@@ -7,6 +7,7 @@ are our own, and assert against this package's public behaviour.
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -34,8 +35,8 @@ def _client(store):
             "installed": {
                 "client_id": "client",
                 "client_secret": "secret",
-                "auth_uri": "https://accounts.example/auth",
-                "token_uri": "https://accounts.example/token",
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
             }
         },
     )
@@ -175,7 +176,7 @@ def test_explicit_legacy_credential_warns(store, monkeypatch, tmp_path):
             "client_id": "c",
             "client_secret": "s",
             "refresh_token": "r",
-            "token_uri": "https://example/token",
+            "token_uri": "https://oauth2.googleapis.com/token",
         },
     )
     monkeypatch.setattr(auth, "_post_form", lambda *a, **k: {"access_token": "legacy"})
@@ -302,7 +303,8 @@ def test_installing_a_client_takes_over_from_the_bundled_one(tmp_path, monkeypat
     downloaded = tmp_path / "downloaded.json"
     downloaded.write_text(json.dumps({"installed": {
         "client_id": "id", "client_secret": "s",
-        "auth_uri": "https://a", "token_uri": "https://t",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
     }}))
     installed, bundled = tmp_path / "store.json", tmp_path / "bundled.json"
     bundled.write_text("{}")
@@ -323,3 +325,119 @@ def test_a_malformed_client_names_which_one_it_was(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "BUNDLED_CLIENT", bad)
     with pytest.raises(auth.AuthError, match="bundled"):
         auth._client()
+
+
+# --- the bundled client, as actually shipped ---------------------------------
+
+
+def test_the_bundled_client_in_this_repo_is_usable():
+    # The suite would otherwise pass with the client missing, malformed, or
+    # rejected by our own validation — and a shipped client that fails validation
+    # is the one failure nobody would think to check for.
+    import marginal
+
+    shipped = Path(marginal.__file__).parent / "oauth-client.json"
+    if not shipped.is_file():
+        pytest.skip("this build ships no OAuth client")
+    installed = auth._installed(json.loads(shipped.read_text()), " (bundled)")
+    assert installed["client_id"].endswith(".apps.googleusercontent.com")
+    assert installed["auth_uri"].startswith("https://accounts.google.com/")
+    assert installed["token_uri"].startswith("https://oauth2.googleapis.com/")
+
+
+# --- client endpoints ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://accounts.evil.example/auth",
+        "http://accounts.google.com/o/oauth2/auth",       # not https
+        "https://accounts.google.com.evil.example/auth",  # suffix, not the domain
+        "https://google.com.evil.example/auth",
+    ],
+)
+def test_a_client_pointing_somewhere_other_than_google_is_refused(uri):
+    # `token_uri` is where this process posts the client secret, the code and the
+    # PKCE verifier. A file naming somewhere else turns `--client` into "send my
+    # authorization to whoever wrote this JSON", and such a file may arrive by
+    # chat message.
+    raw = {"installed": {
+        "client_id": "id", "client_secret": "s",
+        "auth_uri": uri, "token_uri": "https://oauth2.googleapis.com/token",
+    }}
+    with pytest.raises(auth.AuthError, match="not an https Google endpoint"):
+        auth._installed(raw)
+
+
+def test_googles_own_two_domains_are_both_accepted():
+    # A rule allowing only `.google.com` rejects Google: the token endpoint is on
+    # `googleapis.com`. Caught by making the test fixtures realistic.
+    raw = {"installed": {
+        "client_id": "id", "client_secret": "s",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }}
+    assert auth._installed(raw)["client_id"] == "id"
+
+
+def test_a_non_string_field_is_refused_rather_than_used():
+    raw = {"installed": {
+        "client_id": {"nested": "object"}, "client_secret": "s",
+        "auth_uri": "https://accounts.google.com/a", "token_uri": "https://oauth2.googleapis.com/t",
+    }}
+    with pytest.raises(auth.AuthError, match="Desktop app JSON"):
+        auth._installed(raw)
+
+
+# --- what an OAuth error is allowed to say ------------------------------------
+
+
+def test_an_error_never_carries_the_rest_of_the_response():
+    # This runs on the endpoint that mints tokens, and its output lands in
+    # terminals, bug reports and pasted logs. One malformed reply should not put a
+    # refresh token somewhere it outlives the process.
+    body = json.dumps({
+        "error": "invalid_grant",
+        "error_description": "Bad Request",
+        "refresh_token": "1//super-secret-should-never-appear",
+        "access_token": "ya29.also-secret",
+    }).encode()
+    said = auth._why(body)
+    assert "invalid_grant" in said and "Bad Request" in said
+    assert "secret" not in said, said
+
+
+def test_an_unparseable_error_is_described_not_echoed():
+    assert auth._why(b"\x00\x01not json") == "<10 bytes, not JSON>"
+
+
+def test_a_google_api_shaped_error_still_yields_a_reason():
+    said = auth._why({"error": {"status": "PERMISSION_DENIED", "message": "nope"}})
+    assert "PERMISSION_DENIED" in said
+
+
+# --- the account a token actually belongs to ----------------------------------
+
+
+def test_authenticating_as_the_wrong_account_is_refused_and_saves_nothing(monkeypatch):
+    # `login_hint` only suggests. Someone signed into two accounts can pick the
+    # other at the chooser, and the token would be filed under the name that was
+    # asked for — after which comments post as the wrong person on a document
+    # other people can see.
+    monkeypatch.setattr(auth, "authenticated_identity", lambda _t: "other@example.com")
+    with pytest.raises(auth.AuthError) as e:
+        auth._refuse_a_mismatched_identity("wanted@example.com", "tok")
+    assert "other@example.com" in str(e.value) and "--account" in str(e.value)
+
+
+def test_a_matching_identity_passes_and_case_does_not_matter(monkeypatch):
+    monkeypatch.setattr(auth, "authenticated_identity", lambda _t: "Me@Example.com")
+    auth._refuse_a_mismatched_identity("me@example.com", "tok")  # must not raise
+
+
+def test_an_unanswerable_identity_check_does_not_fail_the_login(monkeypatch):
+    # A Drive blip must not turn into a failed authentication: an identity we could
+    # not check is not an identity that failed the check.
+    monkeypatch.setattr(auth, "authenticated_identity", lambda _t: None)
+    auth._refuse_a_mismatched_identity("me@example.com", "tok")  # must not raise

@@ -421,6 +421,14 @@ def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str
             f"and to post what it writes back with `marginal post-batch`."
         )
     if accounts:
+        # Already authenticated, so the long explanation is behind them. One line,
+        # because "you have a token" is not the same as "you knowingly chose whose
+        # project it is on" — someone who authenticated before this shipped never
+        # saw the question at all.
+        if _bundled_client_in_use():
+            return f"{first}\n\nAuthenticated through the OAuth client shipped with " \
+                   f"marginal. `marginal config` shows it; `marginal auth --client` " \
+                   f"switches to your own."
         return first
     lines = [
         first,

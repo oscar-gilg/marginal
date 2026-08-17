@@ -57,18 +57,22 @@ it runs the initial configuration, and the other tabs are incomplete until it ha
 2. **Audience** — `https://console.cloud.google.com/auth/audience?project=<id>`
    **External**, then either **Publish app**, or leave it in Testing and add
    themselves under **Test users**. It must be one or the other — an app that is
-   neither published nor lists them as a test user is refused outright with
-   "has not completed the Google verification process", which reads like a bug and
-   is not one. Publishing avoids the seven-day refresh-token expiry that Testing
-   imposes; Testing avoids showing the app to anyone else. Say both and let them
-   choose.
-3. **Skip Data Access.** Registering scopes there is what pulls an app into the
-   verification queue. marginal requests them at runtime.
+   neither is refused with "has not completed the Google verification process",
+   which reads like a verification problem and is really an access-list one.
+   Publishing avoids the seven-day refresh-token expiry that Testing imposes for
+   these scopes; Testing keeps the app off anyone else's account. Say both and let
+   them choose.
+3. **Data Access can be left alone.** marginal requests its scopes at runtime, so
+   nothing needs registering there for this to work. Note that leaving them
+   unregistered does not exempt an app from Google's verification requirements —
+   it just is not a step they need for setup.
 4. **Clients** — `https://console.cloud.google.com/auth/clients?project=<id>`
    **Create client → Application type: Desktop app** → Create → **Download JSON**.
 
-The type matters. A *Web application* client will not work: this flow redirects to
-loopback, which only desktop clients may do.
+The type matters. marginal reads the `installed` block of the JSON and redirects
+to an ephemeral loopback port, which is what a Desktop client is for. A Web
+application client has a different shape and must pre-register every redirect URI,
+so it will not work here.
 
 ## 3. Authenticate
 

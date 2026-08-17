@@ -17,21 +17,29 @@ comment looks like.
 ```
 /plugin marketplace add oscar-gilg/marginal
 /plugin install marginal@oscar-gilg
+```
+
+**Then restart Claude Code.** Skills are loaded at startup, so the `/marginal:`
+commands do not appear until you do — which looks like a failed install and is not
+one.
+
+```
 /marginal:setup
-```
-
-`/marginal:setup` finds or fetches the CLI, brings up a dedicated Chrome profile,
-checks it is signed into Google, and writes a config matching what it found. Then:
-
-```
 /marginal:comment <doc-url> focus on the methodology, three at most
 /marginal:respond <doc-url>
 ```
 
+`/marginal:setup` finds or fetches the CLI, brings up a dedicated Chrome profile,
+checks it is signed into Google, and writes a config matching what it found. Run it
+once.
+
 `/marginal:comment` takes the document URL and then plain words — what to look for,
-how many to leave — rather than flags. `/marginal:respond` answers the replies, and
-needs Google OAuth; `/marginal:oauth` is there if you would rather run on your own
-Cloud project than the client this ships with.
+how many to leave — rather than flags. `/marginal:respond` answers the replies and
+needs Google OAuth, which needs a client file: ask whoever sent you this for theirs,
+or run `/marginal:oauth` to make your own.
+
+You need [uv](https://docs.astral.sh/uv/) and Google Chrome. Nothing else is
+installed globally — the skills reach the CLI through `uvx`.
 
 **As a CLI**, if you would rather drive it yourself:
 

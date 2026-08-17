@@ -437,14 +437,23 @@ def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str
         f"one: {', '.join(NEEDS_OAUTH)}. Commenting works; answering the replies "
         f"does not.",
         "",
-        "  marginal auth --account you@example.com",
+        "  marginal auth --client /path/to/client_secret.json --account you@example.com",
         "",
     ]
     # Said here rather than left to the plugin, because most of the value of
     # knowing it goes to whoever is *not* being walked through this by an agent.
     # Which project a user's documents are reached through is a choice, and a
     # default nobody was shown is not one.
-    if _bundled_client_in_use():
+    if not auth.client_source():
+        lines += _wrap(
+            "That needs a Google OAuth client, which this build does not ship: one "
+            "identifies the application to Google. If somebody sent you a "
+            "client_secret JSON with this tool, that is the file. Otherwise "
+            "/marginal:oauth walks through making your own, which takes about ten "
+            "minutes and is yours to keep.",
+            2,
+        )
+    elif _bundled_client_in_use():
         lines += _wrap(
             "That uses the OAuth client shipped with marginal, so there is no "
             "Google Cloud project to create — you authenticate through the "

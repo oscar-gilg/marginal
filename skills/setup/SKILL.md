@@ -79,33 +79,38 @@ Do not present the missing key or the missing OAuth client as problems to fix.
 Both are supported paths, and the credential-free one is the reason this tool has
 a browser source at all. Mention what each would buy, once, and leave it.
 
-## 5. Ask once about the OAuth client
+## 5. If they want OAuth, they need a client
 
-If they are going to use OAuth at all, ask — do not decide for them, and do not
-skip it, because the answer determines whose Google Cloud project their documents
-are reached through and that should be a choice rather than a default they never
-saw.
+marginal does not ship an OAuth client, so this is a real step rather than a
+choice about whose project to use. Raise it **only if OAuth is relevant to them** —
+if they are happy commenting and never answering replies, it is not.
 
-Put it roughly like this, in your own words and no longer:
+`marginal config` says under `# oauth client` whether one is already installed. If
+it says **your own**, there is nothing to do here; skip this entirely.
 
-> marginal ships with an OAuth client, so `marginal auth` works straight away.
-> That means you authenticate through the project that ships with the tool rather
-> than one you own. **You don't need to change this** — it works, and the token is
-> yours and stays on your machine.
+Otherwise, put it roughly like this:
+
+> Answering replies, listing threads and removing comments need Google OAuth, and
+> that needs an OAuth client — a file that identifies this application to Google.
+> Commenting works without it.
 >
-> Setting up your own takes about ten minutes of clicking in the Google Cloud
-> console, and buys three things: your API quota is not shared with every other
-> user of the shipped client; you are not subject to its 100-user cap; and if
-> Google ever requires that client to be verified, your setup does not stop
-> working with everyone else's.
->
-> Want to use the shipped one for now, or set up your own?
+> If whoever sent you marginal also sent a `client_secret_….json`, that is the
+> file, and it is one command. Otherwise making your own takes about ten minutes
+> in the Google Cloud console, and it is yours — your own quota, nobody else's
+> project.
 
-If they want their own, run `/marginal:oauth`. If they want the shipped one — or
-have no opinion — say so plainly and move on; it is the sensible default and
-switching later is one command, since an installed client takes precedence from
-then on.
+If they have a file:
 
-Ask this **once**. If they have already authenticated, or already have their own
-client (`marginal config` says `your own` under `# oauth client`), there is nothing
-to ask and raising it is noise.
+```bash
+marginal auth --client "/full/path/to/client_secret_….json" --account NAME
+```
+
+Quote the path and do not glob it — `~/Downloads/client_secret_*.json` expands to
+every client they have ever downloaded, and the extra one lands on a positional
+argument with a confusing error. They run this themselves: it opens a browser for
+consent and takes longer than an automated shell usually allows.
+
+If they want their own, run `/marginal:oauth`.
+
+If they want neither, say so plainly and move on. Commenting is the main thing and
+it works.

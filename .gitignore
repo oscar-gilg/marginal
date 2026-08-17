@@ -12,3 +12,6 @@ marginal.toml
 # Agent-harness configuration: local, and not something to publish.
 .codex/
 .DS_Store
+# The OAuth client is handed to people directly rather than published. Ignored so
+# a copy dropped into the package for local testing cannot be committed by accident.
+src/marginal/oauth-client.json

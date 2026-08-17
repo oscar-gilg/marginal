@@ -420,3 +420,12 @@ def test_an_authenticated_user_on_their_own_client_is_told_nothing(monkeypatch):
     )
     out = setup._next_step(None, keys=["K"], accounts=["me@example.com"])
     assert "shipped with marginal" not in out
+
+
+def test_no_client_at_all_says_where_one_comes_from(monkeypatch):
+    # With nothing shipped, "run marginal auth" is not actionable on its own: the
+    # user needs to know a client is a file they were either given or must make.
+    monkeypatch.setattr(setup.auth, "client_source", lambda: None)
+    out = setup._next_step(None, keys=["K"], accounts=[])
+    assert "--client" in out
+    assert "sent you" in out and "/marginal:oauth" in out

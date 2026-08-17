@@ -57,7 +57,7 @@ inside it.
 | --- | --- | --- |
 | Nothing but Chrome | `source = "browser"`, `mode = "agent"`, `critic = false` | Comments post at the length the agent wrote them, and half the commands are unavailable — see below |
 | A model API key | `mode = "api"` — this tool writes the comments, and the shortening pass runs | — |
-| Google OAuth too | `source = "api"` — a faster read, a revision check before each post, and every command | one command: `marginal auth --account you@example.com` |
+| Google OAuth too | `source = "api"` — a faster read, a revision check before each post, and every command | an OAuth client: one you were given, or ten minutes making your own |
 
 **What the first row cannot do.** `comment`, `review`, `context`, `submit-brief`
 and `post-batch` all work with no Google credentials: they read through the browser
@@ -68,9 +68,8 @@ which has no browser route at all; `read`, `list` and `post` could have one and 
 not yet.
 
 So a Chrome-only install reviews a document and leaves anchored comments, but
-cannot answer the replies, and cannot remove the ones it left. Adding OAuth is one
-command, because this build ships an OAuth client — see below for what that means
-and how to use your own instead.
+cannot answer the replies, and cannot remove the ones it left. Adding OAuth needs a
+Google OAuth client — see below.
 
 `setup` writes whichever of those fits, with the reason for each setting in the
 file next to it. `marginal config` prints what a run here would use and where
@@ -191,58 +190,45 @@ immediately before each post, so a document edited while the reviewer was thinki
 is caught rather than commented on stale.
 
 ```bash
-marginal auth --account you@example.com
+marginal auth --client /path/to/client_secret.json --account you@example.com
 marginal chrome       # sign this Chrome profile into the same account
 ```
 
-That is the whole of it. marginal ships an OAuth client, so there is no Google
-Cloud project to create, no APIs to enable and no consent screen to configure.
+**Where the client comes from.** Google requires an OAuth client to identify the
+application asking for access, and this repository does not publish one. Two ways
+to get one:
+
+- **Somebody sent you theirs.** If you were given a `client_secret_….json` along
+  with this tool, that is it — pass it to `--client` once and it is copied to
+  `~/.config/marginal/` and used from then on.
+- **Make your own**, which takes about ten minutes and is the only option if
+  nobody handed you a file. Create a Google Cloud project, enable the Docs and
+  Drive APIs, configure the consent screen, and create a
+  [**Desktop app** OAuth client](https://developers.google.com/identity/protocols/oauth2/native-app).
+  The `/marginal:oauth` skill walks through it, or see below.
+
+There is deliberately no client in the package. One shipped here would be public
+the moment it was published — a desktop client's secret ships in every copy, which
+is what RFC 8252 means by a *public client* — and every user would then be
+authenticating through one Google Cloud project, sharing its quota and its fate.
 
 **What you are agreeing to.** The consent screen says the app is not verified by
-Google and *"may stop working soon"*, names the developer as the address that owns
-the client rather than you, and describes the access in Google's blunt terms: *see,
-edit, create, and delete all of your Google Drive files*. All of that is accurate.
-The narrower `drive.file` scope will not do: it reaches only files the app created
-or that the user hands it through a picker, and marginal starts from the URL of a
-document that already exists. Your token stays on your machine under
-`~/.config/marginal/` with private permissions; nothing is sent anywhere but
-Google. The client itself is not private and does not need to be — it ships in the
-package, world-readable, which is what RFC 8252 means by a public client.
+Google and *"may stop working soon"*, names whoever owns the client as the
+developer, and describes the access in Google's blunt terms: *see, edit, create,
+and delete all of your Google Drive files*. All of that is accurate. The narrower
+`drive.file` scope will not do: it reaches only files the app created or that the
+user hands it through a picker, and marginal starts from the URL of a document that
+already exists.
 
-**Three consequences of a shipped client**, none of them hidden:
+**Two things worth knowing about the consent screen.** It must be either published
+or list you as a test user — being neither is refused with "has not completed the
+Google verification process", which reads like a verification problem and is really
+an access-list one. And an app left in **Testing** expires its refresh tokens after
+seven days for scopes like these, so you would re-run `marginal auth` weekly;
+publishing avoids that.
 
-- Your API calls count against the shipped project's quota, shared with every
-  other user of it.
-- Unverified apps are capped at 100 authorized users, after which new ones fail.
-- If Google ever requires verification of that client, it stops working for
-  everyone at once.
-
-**Use your own project instead** — recommended if you rely on this, and the way
-around all three. Create a Google Cloud project, enable the Docs and Drive APIs,
-configure the consent screen, create a
-[**Desktop app** OAuth client](https://developers.google.com/identity/protocols/oauth2/native-app),
-and point marginal at its JSON:
-
-```bash
-marginal auth --client ~/Downloads/client_secret.json --account you@example.com
-```
-
-That file is copied into `~/.config/marginal/` and takes precedence from then on;
-there is no setting to remember, because the file's presence is the preference.
 `marginal config` prints which client a run would use, so whose project you are on
 is never something to deduce.
-
-Two things worth knowing if you do run your own. **The consent screen must be
-either published or list you as a test user.** Being neither is refused with
-"has not completed the Google verification process", which reads like a
-verification problem and is really an access-list one. Both routes work — that an
-unverified *published* app still lets people through was confirmed by trying it
-with an account that was neither the owner nor a test user. And **an app left in
-Testing expires its refresh tokens after seven days** for scopes like these, so
-you would re-run `marginal auth` weekly; publishing avoids that.
-
-marginal owns its OAuth tokens and does not discover or modify another tool's
-credential store.
 
 Tokens, and any client you install with `--client`, are stored under
 `~/.config/marginal/` with private file permissions. A bundled client is not: it

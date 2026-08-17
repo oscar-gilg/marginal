@@ -220,10 +220,11 @@ def _client() -> dict:
     found = client_source()
     if found is None:
         raise AuthError(
-            "no OAuth client available. This build ships without one, so point "
-            "marginal at your own: create a Desktop OAuth client in a Google Cloud "
-            "project with the Docs and Drive APIs enabled, then run "
-            "`marginal auth --client /path/to/client_secret.json --account NAME`."
+            "no OAuth client available. One identifies this application to Google, "
+            "and none ships with it. If you were given a client_secret JSON, run "
+            "`marginal auth --client /path/to/it.json --account NAME`. Otherwise "
+            "create a Desktop OAuth client in a Google Cloud project with the Docs "
+            "and Drive APIs enabled, and pass that."
         )
     path, kind = found
     return _installed(_read_json(path, "OAuth client"), f" {path} ({kind})")

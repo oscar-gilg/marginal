@@ -429,3 +429,48 @@ def test_no_client_at_all_says_where_one_comes_from(monkeypatch):
     out = setup._next_step(None, keys=["K"], accounts=[])
     assert "--client" in out
     assert "sent you" in out and "/marginal:oauth" in out
+
+
+def test_a_client_lying_around_is_named_in_the_command(monkeypatch, tmp_path):
+    # The file is usually already on disk — just handed over, or downloaded from the
+    # console minutes ago. "Supply a client" is a step this command can do most of.
+    (tmp_path / "client_secret_123-abc.apps.googleusercontent.com.json").write_text("{}")
+    monkeypatch.setattr(setup.auth, "client_source", lambda: None)
+    monkeypatch.setattr(setup, "CLIENT_HUNTING_GROUND", (str(tmp_path),))
+    out = setup._next_step(None, keys=["K"], accounts=[])
+    assert "client_secret_123-abc" in out
+    assert "/path/to/client_secret.json" not in out, "named a placeholder over a real file"
+
+
+def test_several_clients_are_not_silently_chosen_between(monkeypatch, tmp_path):
+    # Picking one out of several for somebody is how an old download authenticates
+    # against a forgotten project and fails without mentioning it.
+    import os, time
+    for i, name in enumerate(("client_secret_111-old.json", "client_secret_999-new.json")):
+        p = tmp_path / name
+        p.write_text("{}")
+        os.utime(p, (time.time() + i, time.time() + i))
+    monkeypatch.setattr(setup.auth, "client_source", lambda: None)
+    monkeypatch.setattr(setup, "CLIENT_HUNTING_GROUND", (str(tmp_path),))
+    out = setup._next_step(None, keys=["K"], accounts=[])
+    assert "client_secret_999-new" in out, "should offer the newest"
+    assert "2 client files found" in out
+    assert "project number" in out
+
+
+def test_the_two_sided_identity_is_stated_once_oauth_works(monkeypatch):
+    # Invisible until a thread has two names in it: comments go through the browser
+    # and replies through the API, so they carry different accounts unless the same
+    # one is on both sides.
+    monkeypatch.setattr(setup.auth, "client_source", lambda: (Path("/x.json"), "your own"))
+    out = setup._next_step(None, keys=["K"], accounts=["bot@example.com"])
+    assert "bot@example.com" in out
+    assert "Chrome profile is signed into" in out
+
+
+def test_nothing_about_identity_before_oauth_exists(monkeypatch):
+    # With no token there is only one identity, and the warning would be noise.
+    monkeypatch.setattr(setup.auth, "client_source", lambda: None)
+    monkeypatch.setattr(setup, "CLIENT_HUNTING_GROUND", ())
+    out = setup._next_step(None, keys=["K"], accounts=[])
+    assert "answer as another" not in out

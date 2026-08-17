@@ -15,3 +15,7 @@ marginal.toml
 # The OAuth client is handed to people directly rather than published. Ignored so
 # a copy dropped into the package for local testing cannot be committed by accident.
 src/marginal/oauth-client.json
+# Credentials kept beside the checkout for convenience. Never committed: this is
+# the OAuth client handed to people directly, and the whole point is that it is not
+# published.
+private/

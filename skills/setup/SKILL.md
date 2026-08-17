@@ -79,38 +79,53 @@ Do not present the missing key or the missing OAuth client as problems to fix.
 Both are supported paths, and the credential-free one is the reason this tool has
 a browser source at all. Mention what each would buy, once, and leave it.
 
-## 5. If they want OAuth, they need a client
+## 5. OAuth, if they need it
 
-marginal does not ship an OAuth client, so this is a real step rather than a
-choice about whose project to use. Raise it **only if OAuth is relevant to them** —
-if they are happy commenting and never answering replies, it is not.
+**Check whether they need it at all first.** Commenting on a document works without
+any Google credentials. OAuth buys four commands — `list`, `reply`, `respond`,
+`unpost` — which means answering replies and removing comments. Someone who only
+wants to leave comments should not be walked through this.
 
 `marginal config` says under `# oauth client` whether one is already installed. If
-it says **your own**, there is nothing to do here; skip this entirely.
+it says **your own**, skip this section entirely.
 
-Otherwise, put it roughly like this:
+Otherwise `marginal setup` has already printed the exact command, including the
+path to a client file if it found one lying around. Use what it printed rather than
+composing your own — it searched `private/`, the working directory and
+`~/Downloads`, and it names the newest, which is usually the one just handed over.
 
-> Answering replies, listing threads and removing comments need Google OAuth, and
-> that needs an OAuth client — a file that identifies this application to Google.
-> Commenting works without it.
->
-> If whoever sent you marginal also sent a `client_secret_….json`, that is the
-> file, and it is one command. Otherwise making your own takes about ten minutes
-> in the Google Cloud console, and it is yours — your own quota, nobody else's
+Two ways they get a client, and it is worth asking which applies:
+
+> A Google OAuth client is a file that identifies this application to Google, and
+> marginal does not ship one. If whoever sent you marginal also sent a
+> `client_secret_….json`, that is it. If not, making your own takes about ten
+> minutes in the Google Cloud console and it is yours — your own quota, your own
 > project.
 
-If they have a file:
+- **They have a file** → the command setup printed. They run it themselves: it
+  opens a browser and takes longer than an automated shell allows. Quote the path;
+  never glob it, since `client_secret_*.json` expands to every client they have
+  ever downloaded and the extra one becomes a positional argument.
+- **They do not** → `/marginal:oauth`.
+- **Neither, for now** → say so and move on. Commenting is the main thing.
 
-```bash
-marginal auth --client "/full/path/to/client_secret_….json" --account NAME
-```
+Warn them once about the consent screen, so it does not look like a failure:
+**"Google hasn't verified this app"** is expected for a client nobody has submitted
+for review. Advanced → Go to marginal (unsafe) → grant. It will also describe the
+access as *see, edit, create, and delete all of your Google Drive files*, which is
+accurate — Drive's comments API cannot reach a document the app did not create, so
+the narrower scope does not work.
 
-Quote the path and do not glob it — `~/Downloads/client_secret_*.json` expands to
-every client they have ever downloaded, and the extra one lands on a positional
-argument with a confusing error. They run this themselves: it opens a browser for
-consent and takes longer than an automated shell usually allows.
+## 6. The two identities, if OAuth is now working
 
-If they want their own, run `/marginal:oauth`.
+Say this once, because it is invisible until a thread has two names in it:
 
-If they want neither, say so plainly and move on. Commenting is the main thing and
-it works.
+- a **comment** is posted through the browser, so it carries whichever Google
+  account the Chrome profile is signed into;
+- a **reply** goes through the API, so it carries the account that was
+  authenticated.
+
+If those differ, threads open as one person and answer as another, on a document
+other people are reading. Tell them to sign the Chrome profile into the same
+account they authenticated, and — if it is a separate bot account — to share the
+document with it as at least Commenter.

@@ -425,11 +425,28 @@ def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str
         # because "you have a token" is not the same as "you knowingly chose whose
         # project it is on" — someone who authenticated before this shipped never
         # saw the question at all.
+        # The one thing worth saying to someone whose OAuth already works, because
+        # it is invisible until a thread has two names in it: a comment is posted
+        # through the browser and a reply through the API, so the two identities are
+        # the Chrome profile's and the token's. Different accounts means threads
+        # that open as one person and answer as another, on a document other people
+        # are reading.
+        identity = "\n\n" + "\n".join(
+            _wrap(
+                f"Comments post as whichever account this Chrome profile is signed "
+                f"into; replies post as {accounts[0]}. Sign the profile into the "
+                f"same account, or threads will open as one person and answer as "
+                f"another.",
+                2,
+            )
+        )
         if _bundled_client_in_use():
-            return f"{first}\n\nAuthenticated through the OAuth client shipped with " \
-                   f"marginal. `marginal config` shows it; `marginal auth --client` " \
-                   f"switches to your own."
-        return first
+            return (
+                f"{first}\n\nAuthenticated through the OAuth client shipped with "
+                f"marginal. `marginal config` shows it; `marginal auth --client` "
+                f"switches to your own.{identity}"
+            )
+        return first + identity
     lines = [
         first,
         "",
@@ -437,20 +454,40 @@ def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str
         f"one: {', '.join(NEEDS_OAUTH)}. Commenting works; answering the replies "
         f"does not.",
         "",
-        "  marginal auth --client /path/to/client_secret.json --account you@example.com",
-        "",
     ]
     # Said here rather than left to the plugin, because most of the value of
     # knowing it goes to whoever is *not* being walked through this by an agent.
     # Which project a user's documents are reached through is a choice, and a
     # default nobody was shown is not one.
     if not auth.client_source():
+        candidates = find_client_files()
+        if candidates:
+            # The file is usually already on disk — just handed over, or downloaded
+            # from the console minutes ago. Naming it turns "supply a client" into
+            # a line to copy.
+            lines += [
+                f"  marginal auth --client {candidates[0]} --account you@example.com",
+                "",
+            ]
+            if len(candidates) > 1:
+                lines += _wrap(
+                    f"({len(candidates)} client files found; the newest is used above. "
+                    f"The project number is in the filename — check it is the one you "
+                    f"meant, because an old download authenticates against a project "
+                    f"you have forgotten and fails without mentioning it.)",
+                    2,
+                ) + [""]
+        else:
+            lines += [
+                "  marginal auth --client /path/to/client_secret.json --account you@example.com",
+                "",
+            ]
         lines += _wrap(
-            "That needs a Google OAuth client, which this build does not ship: one "
-            "identifies the application to Google. If somebody sent you a "
-            "client_secret JSON with this tool, that is the file. Otherwise "
-            "/marginal:oauth walks through making your own, which takes about ten "
-            "minutes and is yours to keep.",
+            "A Google OAuth client identifies the application to Google, and none "
+            "ships with marginal. If somebody sent you a client_secret JSON along "
+            "with this tool, that is the file. Otherwise /marginal:oauth walks "
+            "through making your own, which takes about ten minutes and is yours to "
+            "keep.",
             2,
         )
     elif _bundled_client_in_use():
@@ -472,6 +509,38 @@ def _bundled_client_in_use() -> bool:
     """Whether a run right now would authenticate through the shipped client."""
     found = auth.client_source()
     return found is not None and found[1] == "bundled"
+
+
+# Where a client file plausibly is, in the order it is worth looking. `private/` is
+# the convention for keeping one beside a checkout; `~/Downloads` is where a browser
+# puts it and where it stays.
+CLIENT_HUNTING_GROUND = ("private", ".", "~/Downloads")
+
+
+def find_client_files() -> list[Path]:
+    """Client JSONs lying around, most recently written first.
+
+    Setup knows a client is needed and the user has usually just been handed one, so
+    telling them to "supply a client" while the file sits in Downloads is a step
+    they have to do and this command could have done. Named rather than installed:
+    picking one for somebody, out of several, is how the wrong project gets used.
+    """
+    found: list[Path] = []
+    for where in CLIENT_HUNTING_GROUND:
+        directory = Path(where).expanduser()
+        if not directory.is_dir():
+            continue
+        for pattern in ("client_secret*.json", "oauth-client.json"):
+            found += [p for p in directory.glob(pattern) if p.is_file()]
+    # Deduplicated by resolved path, because `.` and an absolute path can be the
+    # same file, and offering it twice looks like there is a choice to make.
+    seen, unique = set(), []
+    for p in sorted(found, key=lambda p: -p.stat().st_mtime):
+        key = p.resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+    return unique
 
 
 def _report(checks: list[Check]) -> None:

@@ -20,10 +20,18 @@ comment looks like.
 /marginal:setup
 ```
 
-`/marginal:setup` finds or fetches the CLI, brings up a dedicated Chrome
-profile, checks it is signed into Google, and writes a config matching what it
-found. Then `/marginal:review <doc-url>` reviews a document and
-`/marginal:respond <doc-url>` answers the replies.
+`/marginal:setup` finds or fetches the CLI, brings up a dedicated Chrome profile,
+checks it is signed into Google, and writes a config matching what it found. Then:
+
+```
+/marginal:comment <doc-url> focus on the methodology, three at most
+/marginal:respond <doc-url>
+```
+
+`/marginal:comment` takes the document URL and then plain words — what to look for,
+how many to leave — rather than flags. `/marginal:respond` answers the replies, and
+needs Google OAuth; `/marginal:oauth` is there if you would rather run on your own
+Cloud project than the client this ships with.
 
 **As a CLI**, if you would rather drive it yourself:
 

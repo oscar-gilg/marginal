@@ -570,7 +570,13 @@ sentence is worse than no comment.
 """.strip()
 
 
-def context(doc_id: str, token: str, cfg: Config, tab_id: str | None = None) -> str:
+def context(
+    doc_id: str,
+    token: str,
+    cfg: Config,
+    tab_id: str | None = None,
+    focus: str | None = None,
+) -> str:
     """Everything the commenter needs, and nothing operational.
 
     Agent mode's read half, and the same `brief.sections` API mode sends — the
@@ -601,7 +607,7 @@ comment you mean and let it trim.
 
     parts = brief.sections(
         doc["title"], tab["text"], tab, cfg, reviewer.COMMENTER_CONTRACT, handoff,
-        budget=cfg.comments, prior=_prior_threads(doc_id, token),
+        budget=cfg.comments, focus=focus, prior=_prior_threads(doc_id, token),
     )
     return brief.as_text(parts, FIGURE_CACHE / f"{doc_id}-{tab['id'] or 'only'}")
 

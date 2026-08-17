@@ -513,7 +513,7 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if a.cmd == "context":
-        print(context(doc_id, token, cfg, a.tab))
+        print(context(doc_id, token, cfg, a.tab, a.focus))
         return 0
 
     if a.cmd == "submit-brief":

@@ -1,29 +1,32 @@
 ---
 name: marginal:oauth
 description: >
-  Set up your own Google OAuth client for marginal, instead of the one it ships with. Argument
-  $ARGUMENTS — optionally the Google account to authenticate, e.g. you@example.com. Use when
-  someone wants marginal on their own Google Cloud project: to avoid sharing the bundled
-  client's quota, to get past its 100-user cap, or because they would rather not authenticate
-  through a project they do not control. Not needed to start using marginal — the shipped
-  client works out of the box.
+  Create a Google OAuth client of your own, so marginal can reach the Docs and Drive APIs.
+  Argument $ARGUMENTS — optionally the Google account to authenticate, e.g. you@example.com.
+  Use when someone needs OAuth and has no client file: marginal ships none, and OAuth is what
+  `list`, `reply`, `respond` and `unpost` need. Not needed to comment on a document, and not
+  needed at all if somebody sent them a client_secret JSON — that file is quicker than this.
 argument-hint: "[account@example.com]"
 user-invocable: true
 ---
 
-You are setting up a Google OAuth client that the user owns, so marginal talks to
-Google through their project rather than the one it ships with.
+You are creating a Google OAuth client the user owns, so marginal can reach the
+Docs and Drive APIs on their behalf.
 
-**First, check they need this.** marginal bundles a client and works without any of
-the following. Reasons to do it anyway:
+**First, check they need this at all.** Two questions, in order:
 
-- the bundled client's API quota is shared with every other user of it;
-- unverified apps cap at 100 authorized users, and after that new ones fail;
-- if Google ever demands verification of the bundled client it stops working for
-  everyone at once;
-- they may simply prefer not to authenticate through someone else's project.
+1. **Do they need OAuth?** Commenting on a document needs none. OAuth buys `list`,
+   `reply`, `respond` and `unpost` — answering replies and removing comments. If
+   they only want to leave comments, say so and stop.
+2. **Could somebody send them a client instead?** marginal ships none, so a client
+   is either made or received. Whoever gave them marginal can send theirs in a
+   message, and `marginal auth --client that-file.json --account NAME` is the whole
+   setup. That is faster than everything below, and people overlook it because it
+   means asking rather than doing.
 
-If none of those apply, say so and stop. `marginal auth --account NAME` is enough.
+Their own client is still worth it if they expect heavy use — the quota belongs to
+whoever owns the project — or if they would rather not authenticate through
+somebody else's.
 
 ## 1. The parts you can do for them
 
@@ -102,9 +105,10 @@ marginal config
 ```
 
 Under `# oauth client` it must say **your own** and the path under
-`~/.config/marginal/`. If it still says **bundled**, the install did not happen and
-`auth` did not really succeed, whatever it printed.
+`~/.config/marginal/`. If it says **none**, the install did not happen and `auth`
+did not really succeed, whatever it printed.
 
-Then report: which project, which account, and that the bundled client is no longer
-in use. If they published the consent screen rather than leaving it in Testing, say
-that their address is visible to anyone who authorizes it.
+Then report which project and which account. If they published the consent screen
+rather than leaving it in Testing, say that the address they entered is shown to
+anyone who authorizes the app — which is a reason to use an account made for the
+purpose rather than a personal one.

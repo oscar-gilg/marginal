@@ -1,6 +1,8 @@
 {
-  "name": "marginal",
-  "owner": { "name": "oscar-gilg" },
+  "name": "oscar-gilg",
+  "owner": {
+    "name": "oscar-gilg"
+  },
   "plugins": [
     {
       "name": "marginal",

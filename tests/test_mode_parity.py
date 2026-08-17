@@ -503,3 +503,64 @@ def test_an_unknown_mode_is_refused_at_load(tmp_path):
     p.write_text('mode = "agentic"\n')
     with pytest.raises(ValueError, match="mode"):
         config_mod.load(p)
+
+
+def test_focus_reaches_the_brief_in_both_modes(monkeypatch):
+    """A flag that parses and does nothing is the failure this file exists to stop.
+
+    `--focus` was accepted by every commenting command, threaded through `review`,
+    and dropped on the floor by `context` — so in agent mode it steered nothing and
+    said nothing. The run looked normal and the comments were simply unfocused,
+    which is indistinguishable from a focus the commenter chose to ignore.
+    """
+    from marginal import brief, run
+
+    seen = {}
+
+    def capture(title, text, tab, cfg, contract, handoff, **kw):
+        seen[kw.get("_mode")] = kw.get("focus")
+        return [brief.Section("ask", "x")]
+
+    doc = {"title": "D", "tabs": [{"id": "t.1", "text": DOC, "figures": [], "tables": [],
+                                   "footnotes": [], "paragraphs": []}]}
+    monkeypatch.setattr(run, "read_document", lambda *a, **k: doc)
+    monkeypatch.setattr(run, "_prior_threads", lambda *a, **k: "")
+    monkeypatch.setattr(run.brief, "as_text", lambda parts, where: "brief")
+
+    # Agent mode: the brief is printed for a coding agent to read.
+    monkeypatch.setattr(
+        run.brief, "sections",
+        lambda *a, **kw: seen.__setitem__("agent", kw.get("focus")) or [brief.Section("a", "x")],
+    )
+    run.context("doc", "tok", _cfg(), "t.1", focus="the methodology")
+
+    # API mode: the same brief becomes content blocks for a model.
+    monkeypatch.setattr(
+        run, "_pipeline",
+        lambda doc_id, token, cfg, doc, tab, budget, focus, dry_run: seen.__setitem__(
+            "api", focus
+        ) or (None, [], []),
+    )
+    run.review("doc", "tok", _cfg(), "t.1", n=1, focus="the methodology")
+
+    assert seen["agent"] == "the methodology", "agent mode dropped the focus"
+    assert seen["api"] == seen["agent"], seen
+
+
+def test_the_cli_hands_focus_to_agent_mode(monkeypatch):
+    """Where the bug actually was: `context` grew the parameter, and nothing passed it.
+
+    Testing the function alone would have gone on passing while `--focus` stayed
+    inert on the command line, which is exactly how this survived a suite with
+    twenty-six parity tests in it.
+    """
+    from marginal import cli, gdocs
+
+    got = {}
+    monkeypatch.setattr(gdocs, "access_token", lambda *a, **k: "tok")
+    monkeypatch.setattr(
+        cli, "context", lambda doc_id, token, cfg, tab, focus=None: got.setdefault("focus", focus) or ""
+    )
+    monkeypatch.setattr(cli.config_mod, "load", lambda *a, **k: _cfg(mode="agent"))
+    cli._main(["comment", "1" * 25, "--focus", "the methodology"])
+    assert got["focus"] == "the methodology", "the flag parsed and was dropped"

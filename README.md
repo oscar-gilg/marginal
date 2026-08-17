@@ -16,7 +16,7 @@ comment looks like.
 
 ```
 /plugin marketplace add oscar-gilg/marginal
-/plugin install marginal
+/plugin install marginal@oscar-gilg
 /marginal:setup
 ```
 

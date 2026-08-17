@@ -192,9 +192,24 @@ marginal auth --client ~/Downloads/client_secret.json --account bot@example.com
 marginal chrome       # sign this Chrome profile into the same account
 ```
 
-Do not leave an external consent app in **Testing** if the token must last: Google
-[expires refresh tokens for those apps after seven days](https://developers.google.com/identity/protocols/oauth2#expiration).
-Move it to **Production** when its consent configuration is ready.
+**Leave the consent screen in Testing, and add yourself as a test user.** Not
+Production — that is the advice this file used to give, and it does not work here.
+marginal requests `auth/drive`, a *restricted* scope, and an External app that is
+published while unverified is [blocked outright](https://support.google.com/cloud/answer/7454865?hl=en):
+"Access blocked: marginal has not completed the Google verification process", with
+no way past it. The **Advanced → Go to marginal (unsafe)** bypass exists only for
+apps in Testing, for the test users they name.
+
+The price of Testing is that Google
+[expires its refresh tokens after seven days](https://developers.google.com/identity/protocols/oauth2#expiration),
+so `marginal auth` has to be re-run about weekly. For a personal Google account
+asking for Drive there is no way around that: Production means verification, and
+verification for a restricted scope means a security assessment. A Workspace
+account can make the app Internal instead and avoid both.
+
+Full Drive rather than `drive.file` is not an oversight. `drive.file` reaches only
+files the app itself created, and the whole point is to comment on a document that
+already exists.
 
 The client and tokens are stored under `~/.config/marginal/` with private file
 permissions. The first account becomes the default. With several accounts, select

@@ -34,6 +34,14 @@ SCOPES = (
     "https://www.googleapis.com/auth/drive",
 )
 TIMEOUT = 60
+# How long to wait for Google to redirect back. Much longer than an HTTP timeout,
+# because what happens in between is a person reading screens: an account chooser,
+# the "Google hasn't verified this app" interstitial with its Advanced → Go to
+# (unsafe) bypass, and a consent page listing two scopes. Sixty seconds is not
+# enough for a first-time consent, and running out looks identical to the flow
+# failing — the message says the callback timed out, which reads as a broken tool
+# rather than "you were still clicking".
+CALLBACK_TIMEOUT = 300
 _ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
 
 
@@ -351,7 +359,7 @@ def authorize(account: str, client_path: Path | None = None, no_browser: bool = 
     # but its complete URL still contains the code the user pastes back here.
     server = None if no_browser else HTTPServer(("127.0.0.1", 0), Handler)
     if server is not None:
-        server.timeout = TIMEOUT
+        server.timeout = CALLBACK_TIMEOUT
     port = 53682 if server is None else server.server_port
     redirect_uri = f"http://127.0.0.1:{port}/"
     query = urllib.parse.urlencode(
@@ -379,7 +387,13 @@ def authorize(account: str, client_path: Path | None = None, no_browser: bool = 
                 print(f"Open this URL in a browser:\n\n{url}\n", file=sys.stderr)
             server.handle_request()
             if "url" not in callback:
-                raise AuthError("timed out waiting for Google's OAuth callback")
+                raise AuthError(
+                    f"no OAuth callback within {CALLBACK_TIMEOUT}s. If the browser showed "
+                    "\"Access blocked: ... has not completed the Google verification "
+                    "process\", the consent screen is published rather than in Testing: "
+                    "an unverified external app asking for a restricted scope is refused "
+                    "outright. Set it back to Testing and add this account as a test user."
+                )
             code = _callback_values(callback["url"], state)
     finally:
         if server is not None:

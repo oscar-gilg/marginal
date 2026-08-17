@@ -422,12 +422,39 @@ def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str
         )
     if accounts:
         return first
-    return (
-        f"{first}\n\n"
+    lines = [
+        first,
+        "",
         f"Without Google OAuth, these still need a token and will exit asking for "
         f"one: {', '.join(NEEDS_OAUTH)}. Commenting works; answering the replies "
-        f"does not."
-    )
+        f"does not.",
+        "",
+        "  marginal auth --account you@example.com",
+        "",
+    ]
+    # Said here rather than left to the plugin, because most of the value of
+    # knowing it goes to whoever is *not* being walked through this by an agent.
+    # Which project a user's documents are reached through is a choice, and a
+    # default nobody was shown is not one.
+    if _bundled_client_in_use():
+        lines += _wrap(
+            "That uses the OAuth client shipped with marginal, so there is no "
+            "Google Cloud project to create — you authenticate through the "
+            "project that ships with the tool rather than one you own. That is "
+            "fine, and the token stays on this machine. Setting up your own takes "
+            "about ten minutes in the Google Cloud console and means your API "
+            "quota is not shared, the 100-user cap on the shipped client does not "
+            "apply, and a verification demand against it cannot stop your setup "
+            "working. See `marginal auth --client`, or the /marginal:oauth skill.",
+            2,
+        )
+    return "\n".join(lines)
+
+
+def _bundled_client_in_use() -> bool:
+    """Whether a run right now would authenticate through the shipped client."""
+    found = auth.client_source()
+    return found is not None and found[1] == "bundled"
 
 
 def _report(checks: list[Check]) -> None:

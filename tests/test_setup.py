@@ -380,3 +380,32 @@ def test_setup_is_reachable_from_the_cli_without_a_document(monkeypatch, tmp_pat
     monkeypatch.chdir(tmp_path)
     assert cli._main(["setup"]) == 0
     assert called["doc"] is None
+
+
+def test_a_bundled_client_is_disclosed_at_setup_time(monkeypatch):
+    # Which Google Cloud project a user's documents are reached through is a choice.
+    # A default nobody was shown is not one, and most users never see the plugin
+    # skill that would otherwise be the only place this is said.
+    monkeypatch.setattr(setup.auth, "client_source", lambda: (Path("/pkg/oauth.json"), "bundled"))
+    out = setup._next_step(None, keys=["K"], accounts=[])
+    assert "shipped with marginal" in out
+    assert "your own" in out
+    assert "100-user cap" in out
+
+
+def test_a_client_of_your_own_prompts_nothing(monkeypatch):
+    # Nothing to disclose and nothing to offer: raising it would be noise.
+    monkeypatch.setattr(
+        setup.auth, "client_source", lambda: (Path("~/.config/marginal/x.json"), "your own")
+    )
+    out = setup._next_step(None, keys=["K"], accounts=[])
+    assert "shipped with marginal" not in out
+
+
+def test_nothing_is_said_about_clients_once_oauth_is_working(monkeypatch):
+    # `accounts` non-empty means they have already authenticated. The decision is
+    # behind them; repeating it is the kind of advice that trains people to skim.
+    monkeypatch.setattr(setup.auth, "client_source", lambda: (Path("/pkg/oauth.json"), "bundled"))
+    out = setup._next_step(None, keys=["K"], accounts=["me@example.com"])
+    assert "shipped with marginal" not in out
+    assert "marginal auth" not in out

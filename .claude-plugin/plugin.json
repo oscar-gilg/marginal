@@ -1,6 +1,6 @@
 {
   "name": "marginal",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Review a Google Doc and leave native anchored comments in it",
   "author": {
     "name": "Oscar Gilg",

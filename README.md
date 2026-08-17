@@ -49,7 +49,7 @@ inside it.
 | --- | --- | --- |
 | Nothing but Chrome | `source = "browser"`, `mode = "agent"`, `critic = false` | Comments post at the length the agent wrote them, and half the commands are unavailable — see below |
 | A model API key | `mode = "api"` — this tool writes the comments, and the shortening pass runs | — |
-| Google OAuth too | `source = "api"` — a faster read, a revision check before each post, and every command | — |
+| Google OAuth too | `source = "api"` — a faster read, a revision check before each post, and every command | one command: `marginal auth --account you@example.com` |
 
 **What the first row cannot do.** `comment`, `review`, `context`, `submit-brief`
 and `post-batch` all work with no Google credentials: they read through the browser
@@ -60,8 +60,9 @@ which has no browser route at all; `read`, `list` and `post` could have one and 
 not yet.
 
 So a Chrome-only install reviews a document and leaves anchored comments, but
-cannot answer the replies. That is the concrete cost of skipping OAuth, and it is
-the reason to do it eventually.
+cannot answer the replies, and cannot remove the ones it left. Adding OAuth is one
+command, because this build ships an OAuth client — see below for what that means
+and how to use your own instead.
 
 `setup` writes whichever of those fits, with the reason for each setting in the
 file next to it. `marginal config` prints what a run here would use and where
@@ -181,35 +182,56 @@ With it, the document is read in one JSON call and the revision is rechecked
 immediately before each post, so a document edited while the reviewer was thinking
 is caught rather than commented on stale.
 
-Marginal owns its OAuth tokens; it does not discover or modify another tool's
-credential store. In Google Cloud, enable the Google Docs API and Google Drive API,
-configure the OAuth consent screen, create a
-[**Desktop app** OAuth client](https://developers.google.com/identity/protocols/oauth2/native-app),
-and download its JSON. Then authenticate a named account:
-
 ```bash
-marginal auth --client ~/Downloads/client_secret.json --account bot@example.com
+marginal auth --account you@example.com
 marginal chrome       # sign this Chrome profile into the same account
 ```
 
-**Leave the consent screen in Testing, and add yourself as a test user.** Not
-Production — that is the advice this file used to give, and it does not work here.
-marginal requests `auth/drive`, a *restricted* scope, and an External app that is
-published while unverified is [blocked outright](https://support.google.com/cloud/answer/7454865?hl=en):
-"Access blocked: marginal has not completed the Google verification process", with
-no way past it. The **Advanced → Go to marginal (unsafe)** bypass exists only for
-apps in Testing, for the test users they name.
+That is the whole of it. marginal ships an OAuth client, so there is no Google
+Cloud project to create, no APIs to enable and no consent screen to configure.
 
-The price of Testing is that Google
-[expires its refresh tokens after seven days](https://developers.google.com/identity/protocols/oauth2#expiration),
-so `marginal auth` has to be re-run about weekly. For a personal Google account
-asking for Drive there is no way around that: Production means verification, and
-verification for a restricted scope means a security assessment. A Workspace
-account can make the app Internal instead and avoid both.
+**What you are agreeing to.** The consent screen will say the app is not verified
+by Google and *"may stop working soon"*, name the developer as the address that
+owns the client rather than you, and describe the access in Google's blunt terms:
+*see, edit, create, and delete all of your Google Drive files*. All of that is
+accurate. marginal needs write access to a document's comments, and Drive's
+comments API cannot reach a document the app did not itself create, so the
+narrower `drive.file` scope will not do. The token is yours and stays on your
+machine under `~/.config/marginal/`; nothing is sent anywhere but Google.
 
-Full Drive rather than `drive.file` is not an oversight. `drive.file` reaches only
-files the app itself created, and the whole point is to comment on a document that
-already exists.
+**Three consequences of a shipped client**, none of them hidden:
+
+- Your API calls count against the shipped project's quota, shared with every
+  other user of it.
+- Unverified apps are capped at 100 authorized users, after which new ones fail.
+- If Google ever requires verification of that client, it stops working for
+  everyone at once. This is what "may stop working soon" refers to.
+
+**Use your own project instead** — recommended if you rely on this, and the way
+around all three. Create a Google Cloud project, enable the Docs and Drive APIs,
+configure the consent screen, create a
+[**Desktop app** OAuth client](https://developers.google.com/identity/protocols/oauth2/native-app),
+and point marginal at its JSON:
+
+```bash
+marginal auth --client ~/Downloads/client_secret.json --account you@example.com
+```
+
+That file is copied into `~/.config/marginal/` and takes precedence from then on;
+there is no setting to remember, because the file's presence is the preference.
+`marginal config` prints which client a run would use, so whose project you are on
+is never something to deduce.
+
+Two things worth knowing if you do run your own. **Leave the consent screen in
+Testing and add yourself as a test user**, or publish it — either works, but an
+app that is neither published nor lists you as a test user is
+[blocked outright](https://support.google.com/cloud/answer/7454865?hl=en) with
+"has not completed the Google verification process". And **a consent screen left
+in Testing expires its refresh tokens after seven days**, so you re-run
+`marginal auth` weekly; publishing avoids that.
+
+marginal owns its OAuth tokens and does not discover or modify another tool's
+credential store.
 
 The client and tokens are stored under `~/.config/marginal/` with private file
 permissions. The first account becomes the default. With several accounts, select

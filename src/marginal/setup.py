@@ -269,9 +269,10 @@ def google_accounts(account: str | None = None) -> tuple[Check, list[str]]:
             False,
             "no accounts — optional",
             fix="Without it, the document is read and verified through the browser "
-            "session instead, which needs no Google Cloud project at all. "
-            "`marginal auth --client CLIENT.json --account you@example.com` "
-            "adds it, and buys a faster read and a revision check before each post.",
+            "session instead, and `list`, `reply`, `respond` and `unpost` are "
+            "unavailable. `marginal auth --account you@example.com` adds it in one "
+            "step — this build ships an OAuth client, so there is no Google Cloud "
+            "project to create.",
         ),
         [],
     )

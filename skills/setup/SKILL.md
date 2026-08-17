@@ -71,7 +71,11 @@ Report, in a couple of lines:
   write the comments, Marginal places them — and the shortening pass is off,
   so comments post at whatever length they were written;
 - whether Google OAuth was found. Without it the document is read through the
-  browser session, which needs no Google Cloud project at all;
+  browser session, and `list`, `reply`, `respond` and `unpost` are unavailable.
+  Adding it is one command — `marginal auth --account you@example.com` — because
+  this build ships an OAuth client. `/marginal:oauth` sets up their own instead,
+  which is worth mentioning only if they ask why they are authenticating through
+  somebody else's project;
 - that `/marginal:review <doc-url>` is the next thing to run.
 
 Do not present the missing key or the missing OAuth client as problems to fix.

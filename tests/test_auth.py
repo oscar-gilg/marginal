@@ -263,3 +263,63 @@ def test_a_failed_write_neither_leaks_a_token_nor_double_closes(tmp_path, monkey
     assert not [fd for fd in closed if fd in handed_over], closed
     assert not target.exists()
     assert list(tmp_path.iterdir()) == [], "a temporary file was left holding a token"
+
+
+def test_a_client_you_installed_beats_the_bundled_one(tmp_path, monkeypatch):
+    # The whole point of `--client` is running on your own Cloud project. A bundled
+    # client that quietly won would send a user's documents through somebody else's
+    # project while they believed otherwise.
+    mine, bundled = tmp_path / "mine.json", tmp_path / "bundled.json"
+    mine.write_text("{}")
+    bundled.write_text("{}")
+    monkeypatch.setattr(auth, "CLIENT_PATH", mine)
+    monkeypatch.setattr(auth, "BUNDLED_CLIENT", bundled)
+    assert auth.client_source() == (mine, "your own")
+
+
+def test_the_bundled_client_is_used_when_there_is_no_other(tmp_path, monkeypatch):
+    bundled = tmp_path / "bundled.json"
+    bundled.write_text("{}")
+    monkeypatch.setattr(auth, "CLIENT_PATH", tmp_path / "absent.json")
+    monkeypatch.setattr(auth, "BUNDLED_CLIENT", bundled)
+    assert auth.client_source() == (bundled, "bundled")
+
+
+def test_no_client_at_all_says_how_to_supply_one(tmp_path, monkeypatch):
+    # A build shipping without a client is supported. Failing with "not found" and a
+    # path would send the reader looking for a file that was never meant to exist.
+    monkeypatch.setattr(auth, "CLIENT_PATH", tmp_path / "absent.json")
+    monkeypatch.setattr(auth, "BUNDLED_CLIENT", tmp_path / "also-absent.json")
+    assert auth.client_source() is None
+    with pytest.raises(auth.AuthError) as e:
+        auth._client()
+    assert "--client" in str(e.value)
+
+
+def test_installing_a_client_takes_over_from_the_bundled_one(tmp_path, monkeypatch):
+    # No flag to remember and no state to get out of step: the file's presence is
+    # the preference.
+    downloaded = tmp_path / "downloaded.json"
+    downloaded.write_text(json.dumps({"installed": {
+        "client_id": "id", "client_secret": "s",
+        "auth_uri": "https://a", "token_uri": "https://t",
+    }}))
+    installed, bundled = tmp_path / "store.json", tmp_path / "bundled.json"
+    bundled.write_text("{}")
+    monkeypatch.setattr(auth, "CLIENT_PATH", installed)
+    monkeypatch.setattr(auth, "BUNDLED_CLIENT", bundled)
+    monkeypatch.setattr(auth, "CONFIG_DIR", tmp_path)
+    assert auth.client_source() == (bundled, "bundled")
+    auth.install_client(downloaded)
+    assert auth.client_source() == (installed, "your own")
+    assert auth._client()["client_id"] == "id"
+
+
+def test_a_malformed_client_names_which_one_it_was(tmp_path, monkeypatch):
+    # "your own" and "bundled" fail for different reasons and have different fixes.
+    bad = tmp_path / "bundled.json"
+    bad.write_text(json.dumps({"web": {"client_id": "x"}}))
+    monkeypatch.setattr(auth, "CLIENT_PATH", tmp_path / "absent.json")
+    monkeypatch.setattr(auth, "BUNDLED_CLIENT", bad)
+    with pytest.raises(auth.AuthError, match="bundled"):
+        auth._client()

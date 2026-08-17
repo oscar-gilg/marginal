@@ -163,6 +163,19 @@ def _show_config(cfg, where: dict[str, str]) -> int:
             else:
                 print(_colour("2", f"  {field} {shown}"))
         print()
+    # Not a setting, and printed anyway. A bundled OAuth client means a run reaches
+    # the user's documents through somebody else's Google Cloud project, which is
+    # the sort of thing that should be visible rather than deduced.
+    print(_colour("1", "# oauth client"))
+    found = auth.client_source()
+    if found is None:
+        print(_colour("2", f"  {'none':<20} run `marginal auth --client ...`"))
+    else:
+        path, kind = found
+        field = f"{kind:<20}"
+        print(f"  {_colour('36', field)} {path}" if kind == "your own"
+              else _colour("2", f"  {field} {path}"))
+    print()
     return 0
 
 

@@ -26,6 +26,10 @@ from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".config/marginal"
 CLIENT_PATH = CONFIG_DIR / "oauth-client.json"
+# The client shipped with the package, if this build has one. Beside the prompts,
+# by the same force-include, so an installed copy carries it and a checkout does
+# not have to. Absent is a supported state: `_client` then says how to supply one.
+BUNDLED_CLIENT = Path(__file__).resolve().parent / "oauth-client.json"
 AUTH_PATH = CONFIG_DIR / "auth.json"
 ACCOUNTS_DIR = CONFIG_DIR / "accounts"
 
@@ -162,12 +166,52 @@ def _installed(raw: dict, where: str = "") -> dict:
     return installed
 
 
+def client_source() -> tuple[Path, str] | None:
+    """Which OAuth client a run would use, and what kind it is.
+
+    Two places, most specific first:
+
+    1. `~/.config/marginal/oauth-client.json` — installed by `auth --client`, and
+       the one to use to run on your own Google Cloud project.
+    2. the copy shipped inside the package — so that a new user runs one command
+       instead of creating a project, enabling two APIs and configuring a consent
+       screen before they can try anything.
+
+    Returned rather than just opened, because "whose project am I on" is a question
+    worth being able to answer directly. A shipped client means a user's documents
+    are reached through *somebody else's* Cloud project, and that should never have
+    to be inferred from behaviour.
+
+    A desktop client's `client_secret` is not a secret — it ships in every copy, by
+    construction, which is why the flow uses PKCE and why the redirect is confined
+    to loopback. See RFC 8252.
+    """
+    if CLIENT_PATH.is_file():
+        return CLIENT_PATH, "your own"
+    if BUNDLED_CLIENT.is_file():
+        return BUNDLED_CLIENT, "bundled"
+    return None
+
+
 def _client() -> dict:
-    return _installed(_read_json(CLIENT_PATH, "OAuth client"), f" {CLIENT_PATH}")
+    found = client_source()
+    if found is None:
+        raise AuthError(
+            "no OAuth client available. This build ships without one, so point "
+            "marginal at your own: create a Desktop OAuth client in a Google Cloud "
+            "project with the Docs and Drive APIs enabled, then run "
+            "`marginal auth --client /path/to/client_secret.json --account NAME`."
+        )
+    path, kind = found
+    return _installed(_read_json(path, "OAuth client"), f" {path} ({kind})")
 
 
 def install_client(path: Path) -> None:
-    """Validate and copy a downloaded Desktop OAuth client into our store."""
+    """Validate and copy a downloaded Desktop OAuth client into our store.
+
+    Installing takes precedence over the bundled one from then on, permanently and
+    without a flag to remember: the file's presence *is* the preference.
+    """
     raw = _read_json(Path(path).expanduser(), "OAuth client")
     _installed(raw)
     _write_private(CLIENT_PATH, json.dumps(raw, indent=2) + "\n")

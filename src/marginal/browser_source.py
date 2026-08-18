@@ -265,6 +265,90 @@ def _live_text(para: ET.Element) -> str:
     return "".join(parts)
 
 
+def _del_contributes(child: ET.Element) -> str | None:
+    """`_contributes`, but for elements inside a suggested deletion.
+
+    Deleted characters live in `w:delText` rather than `w:t`, and a deleted tab or
+    line break keeps its own element. The mapping mirrors `_contributes` character
+    for character so that a deletion's text is exactly the characters the stream
+    lost — anything else and a verified suggestion could differ from its quote by
+    a whitespace character while still reading as present.
+    """
+    tag = child.tag
+    if tag == f"{W}delText":
+        return child.text or ""
+    if tag == f"{W}tab":
+        return "\t"
+    if tag in (f"{W}br", f"{W}cr"):
+        return LINE_BREAK
+    return None
+
+
+def suggestions_from_docx(blob: bytes) -> list[dict]:
+    """The document's tracked changes, as [{'deleted', 'inserted', 'offset'}].
+
+    One entry per *site*: a maximal run of suggested content with no live text
+    inside it, so a replacement typed as delete-plus-insert comes back as a single
+    record however the editor interleaved the two. `offset` is the site's position
+    in the live character stream — the same space `text_from_docx` produces, in
+    which inserted text counts (it is live) and deleted text does not.
+
+    Adjacent suggestions with no live character between them merge into one site;
+    callers matching a specific edit should test containment, not equality of the
+    whole site.
+    """
+    z = zipfile.ZipFile(BytesIO(blob))
+    body = ET.fromstring(z.read("word/document.xml")).find(f"{W}body")
+    if body is None:
+        return []
+
+    # (kind, chars) runs in document order, kind ∈ live | ins | del. The character
+    # rules are `_contributes` (and its deletion twin), the same ones the stream
+    # uses, so a site's offset indexes the same space anchors resolve in.
+    seq: list[tuple[str, str]] = []
+
+    def walk(node: ET.Element, kind: str) -> None:
+        for child in node:
+            tag = child.tag
+            if tag == f"{W}ins":
+                walk(child, "ins")
+                continue
+            if tag == f"{W}del":
+                walk(child, "del")
+                continue
+            chars = _del_contributes(child) if kind == "del" else _contributes(child)
+            if chars is None:
+                walk(child, kind)
+            elif chars:
+                seq.append((kind, chars))
+
+    for para in body.iter(f"{W}p"):
+        walk(para, "live")
+        # The paragraph terminator is a live character, exactly as in the stream.
+        seq.append(("live", "\n"))
+
+    out: list[dict] = []
+    pos = 0
+    site: dict | None = None
+    for kind, chars in seq:
+        if kind == "live":
+            site = None
+            pos += len(chars)
+            continue
+        if site is None:
+            site = {"deleted": "", "inserted": "", "offset": pos}
+            out.append(site)
+        site["inserted" if kind == "ins" else "deleted"] += chars
+        if kind == "ins":
+            pos += len(chars)
+    return out
+
+
+def read_suggestions(page: Page, doc_id: str, tab_id: str | None = None) -> list[dict]:
+    """Tracked changes read through the browser session — see `suggestions_from_docx`."""
+    return suggestions_from_docx(export(page, doc_id, "docx", tab_id=tab_id))
+
+
 def read_comments(page: Page, doc_id: str) -> list[dict]:
     """Comments and their anchored text, read from the docx export.
 

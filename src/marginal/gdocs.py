@@ -161,6 +161,14 @@ def tab_text(tab: dict) -> dict:
                     s = tr.get("content", "") if tr else ""
                     if not s:
                         continue
+                    # Suggested deletions are shown struck through but are not part
+                    # of the live document; the docx reader excludes them for the
+                    # same reason (`browser_source._contributes`). Counting them
+                    # here would make the two sources disagree about every offset
+                    # after a suggestion. Suggested insertions stay: they are live
+                    # text, and both readers include them.
+                    if tr.get("suggestedDeletionIds"):
+                        continue
                     out.append(s)
                     pos += len(s)
                 style = para.get("paragraphStyle", {}).get("namedStyleType", "NORMAL_TEXT")
@@ -198,6 +206,8 @@ def tab_text(tab: dict) -> dict:
             pe.get("textRun", {}).get("content", "")
             for e in note.get("content", [])
             for pe in e.get("paragraph", {}).get("elements", [])
+            # Same rule as the body walk: a suggested deletion is not live text.
+            if not pe.get("textRun", {}).get("suggestedDeletionIds")
         ).strip()
         footnotes.append({"number": ref["number"], "at": ref["at"], "text": text})
 

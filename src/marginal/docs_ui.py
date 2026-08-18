@@ -49,6 +49,15 @@ class SpanError(ValueError):
     """The requested quote does not identify exactly one span."""
 
 
+class SuggestNotReady(RuntimeError):
+    """A suggestion was refused before anything was typed; safe to retry.
+
+    A distinct type because the caller's retry policy hangs on it: everything up
+    to the first typed character can be retried freely, and anything after it is
+    terminal — retrying a typing failure could apply the same edit twice.
+    """
+
+
 @dataclass
 class Span:
     start: int
@@ -164,6 +173,117 @@ def select_span(
         break
 
     return False, events, got
+
+
+# The editor's mode switcher. The *class* carries the current mode
+# (`edit-mode` / `suggest-mode`), which unlike the label text does not depend on
+# the UI language; the aria-label is read alongside as a cross-check. Empty text
+# and a `-disabled` class right after load mean "not ready yet", not "unknown".
+_MODE_JS = """(() => {
+  const el = document.querySelector('#docs-toolbar-mode-switcher');
+  if (!el) return null;
+  return {cls: el.className, aria: el.getAttribute('aria-label') || '',
+          text: el.textContent.trim()};
+})()"""
+
+# Probed against the live editor: the Cmd+Opt+Shift+Z chord does not switch
+# modes, so the switcher's dropdown is driven directly. The menu item is found by
+# its text, which *is* language-dependent — an English UI is assumed, as the
+# probe-and-refuse below turns a miss into a refusal rather than a wrong mode.
+_PICK_MODE_JS = """((pattern) => {
+  const btn = document.querySelector('#docs-toolbar-mode-switcher');
+  if (!btn) return 'no mode switcher';
+  for (const type of ['mousedown', 'mouseup', 'click'])
+    btn.dispatchEvent(new MouseEvent(type, {bubbles: true}));
+  const item = [...document.querySelectorAll('.goog-menuitem')]
+    .find(m => m.offsetParent !== null && new RegExp(pattern, 'i').test(m.textContent));
+  if (!item) return 'no matching menu item';
+  for (const type of ['mousedown', 'mouseup', 'click'])
+    item.dispatchEvent(new MouseEvent(type, {bubbles: true}));
+  return 'ok';
+})"""
+
+_MODE_CLASSES = {"edit-mode": "editing", "suggest-mode": "suggesting", "view-mode": "viewing"}
+_MODE_PATTERNS = {"editing": "^Editing", "suggesting": "^Suggesting", "viewing": "^Viewing"}
+
+
+def editor_mode(page: Page, timeout: float = 5.0) -> str:
+    """The editor's current mode: 'editing', 'suggesting' or 'viewing'.
+
+    Raises rather than guessing when the switcher is missing or unreadable — an
+    unknown mode must refuse exactly as an ambiguous anchor does, because the
+    caller is deciding whether a keystroke becomes a tracked change or a real
+    edit.
+    """
+    deadline = time.time() + timeout
+    probe = None
+    while time.time() < deadline:
+        probe = page.eval(_MODE_JS)
+        if probe:
+            for marker, mode in _MODE_CLASSES.items():
+                if marker in probe["cls"].split():
+                    return mode
+        time.sleep(0.1)
+    raise RuntimeError(f"editor mode could not be read (switcher: {probe!r})")
+
+
+def set_mode(page: Page, mode: str, timeout: float = 5.0) -> str:
+    """Switch the editor to `mode`, confirm it took, and return the previous mode.
+
+    Confirm-or-raise: nothing downstream may type until the probe reads the mode
+    it asked for, because a keystroke in the wrong mode either edits the document
+    for real (wanted suggesting, got editing) or silently does nothing.
+    """
+    if mode not in _MODE_PATTERNS:
+        raise ValueError(f"unknown editor mode {mode!r}")
+    before = editor_mode(page, timeout=timeout)
+    if before == mode:
+        return before
+    outcome = page.eval(f"{_PICK_MODE_JS}({_MODE_PATTERNS[mode]!r})")
+    if outcome != "ok":
+        raise RuntimeError(f"could not reach the mode menu: {outcome}")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if editor_mode(page, timeout=timeout) == mode:
+            return before
+        time.sleep(0.1)
+    raise RuntimeError(f"asked the editor for {mode} mode and it stayed in {editor_mode(page)}")
+
+
+def suggest_edit(
+    page: Page,
+    span: Span,
+    replacement: str,
+    paragraphs: list[dict],
+    strategy: str = "paragraph",
+    text: str | None = None,
+) -> int:
+    """Type `replacement` over `span` as a suggested edit. Returns key events sent.
+
+    Assumes `set_mode(page, "suggesting")` has already succeeded; the mode is
+    probed again here, immediately before typing, so a mode that changed under us
+    refuses rather than editing the document for real.
+
+    The replacement is typed as real keypresses (`Page.type_text`), not
+    `Input.insertText`: probed live, insertText over a selection in Suggesting
+    mode inserts *without* deleting the selection, and Backspace/Delete both
+    suggest-delete one extra character next to a word-shaped selection. A typed
+    character replaces the selection byte-exactly. Pure deletions are therefore
+    expressed by the caller as a wider replacement that omits the text, never as
+    an empty replacement.
+
+    Everything before the first typed character is safe to retry; the typing is
+    the terminal act, exactly as submission is for a comment.
+    """
+    if not replacement:
+        raise ValueError("a suggestion needs a non-empty replacement")
+    exact, events, got = select_span(page, span, paragraphs, strategy, text=text)
+    if not exact:
+        raise SuggestNotReady(f"selection not confirmed (got {(got or '')[:60]!r})")
+    if (current := editor_mode(page)) != "suggesting":
+        raise SuggestNotReady(f"editor is in {current} mode, not suggesting; nothing typed")
+    page.type_text(replacement)
+    return events + len(replacement)
 
 
 def post_comment(page: Page, body: str, timeout: float = 5.0, settle: float = 0.35) -> None:

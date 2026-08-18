@@ -154,25 +154,46 @@ def explain(text: str, quote: str) -> str:
     )
 
 
-def resolve(text: str, quote: str, reconcile=None) -> tuple[Span, str]:
+# The rungs a suggestion may anchor through. A comment on a fuzzy match is a
+# comment slightly off; a *replacement* of a fuzzy match deletes words the model
+# never quoted. The word-exact rungs stay: every rung returns the document's own
+# bytes as the span, so what these exclude is the guessing, not the exactness.
+STRICT_RUNGS = ("verbatim", "stripped", "whitespace")
+
+
+def resolve(
+    text: str, quote: str, reconcile=None, rungs: tuple[str, ...] | None = None
+) -> tuple[Span, str]:
     """Locate `quote` in the document text. Returns (span, which rung matched).
 
     `reconcile` is called only if every deterministic rung fails; omit it and this
     raises instead, which is what the reviewer's own retry loop wants — there the
     model is mid-conversation and can simply re-anchor for free.
+
+    `rungs` restricts which rungs may answer (`None` allows them all). One ladder
+    with an allow-list rather than a second ladder: the rungs themselves must not
+    depend on who is asking, only how far down the caller is willing to go.
     """
+    allowed = None if rungs is None else set(rungs)
+
+    def may(how: str) -> bool:
+        return allowed is None or how in allowed
+
     for how, candidate in (("verbatim", quote), ("stripped", to_plain(quote))):
-        if not candidate:
+        if not may(how) or not candidate:
             continue
         try:
             return resolve_quote(text, candidate), how
         except SpanError:
             pass
     plain = to_plain(quote)
-    for how, span in (("whitespace", _flexible(text, plain)), ("fuzzy", _fuzzy(text, plain))):
+    for how, finder in (("whitespace", _flexible), ("fuzzy", _fuzzy)):
+        if not may(how):
+            continue
+        span = finder(text, plain)
         if span is not None:
             return span, how
-    if reconcile is not None:
+    if reconcile is not None and may("model"):
         fixed = reconcile(text, quote)
         if fixed:
             # Trust nothing the model returns: it has to resolve like any other

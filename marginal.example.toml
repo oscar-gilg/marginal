@@ -54,6 +54,15 @@ web_search = false
 # and every run prints which of the two it got.
 web_search_max_uses = 5
 
+# Let the commenter propose suggested edits — tracked changes made in the editor's
+# Suggesting mode, which the author accepts or rejects in place — alongside
+# comments. Off by default: a suggestion edits the document, so a wrong anchor is
+# worse than a misplaced comment. When on, a suggestion must anchor without the
+# fuzzy or model rungs; one that cannot is rejected rather than guessed at.
+# Suggestions cannot be withdrawn by this tool (they have no Drive id) — rejection
+# happens in the Docs UI.
+suggestions = false
+
 # --- browser ---
 port = 9222
 profile = ".chrome-profile"

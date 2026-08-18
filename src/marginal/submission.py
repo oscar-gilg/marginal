@@ -28,6 +28,7 @@ function calls either way.
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 
@@ -84,6 +85,12 @@ class Submitter:
         self.rungs: list[str] = []
         self._seen: set[str] = set()
         self._accepted = 0
+        # Accepted suggestions, queued rather than placed one by one: they post
+        # after every comment, bottom of the document first, so no anchor is ever
+        # navigated to across one of our own edits. `post.post_suggestions` owns
+        # that ordering; this list is document order as submitted.
+        self.suggestions: list[tuple[str, str]] = []
+        self._suggested_spans: list[tuple[int, int]] = []
         # `accept` runs on the generator thread and `critique`/`place` on workers,
         # but `notes` is appended from all of them.
         self._lock = threading.Lock()
@@ -123,6 +130,126 @@ class Submitter:
             self._seen.add(span.quote)
             self._accepted += 1
             self.rungs.append(rung)
+        return Verdict(True, quote=span.quote, rung=rung)
+
+    def accept_suggestion(self, quote: str, replacement: str) -> Verdict:
+        """Anchor and queue one suggested edit. Stricter than `accept`, on purpose.
+
+        A suggestion edits the document, so the anchor ladder stops at the
+        word-exact rungs (`anchors.STRICT_RUNGS`) and there is no model fallback:
+        imprecise resolves as absent, exactly as ambiguous does. The replacement is
+        never edited by anyone — what is accepted here is what gets typed.
+        """
+        quote = (quote or "").strip()
+        replacement = (replacement or "").strip()
+        if not quote or not replacement:
+            return Verdict(
+                False,
+                reason=(
+                    "a suggestion needs both a quote and a replacement. To delete "
+                    "text, quote a wider passage and give a replacement that omits it."
+                ),
+            )
+        if replacement == quote:
+            return Verdict(False, reason="the replacement is identical to the quote.")
+        if "\n" in replacement:
+            return Verdict(
+                False,
+                reason=(
+                    "a replacement must stay within one paragraph — no newlines. "
+                    "Suggest the paragraphs separately."
+                ),
+            )
+        if re.search(r"\*[^*\n]+\*|`", replacement):
+            # The replacement is typed as plain characters: Markdown does not
+            # render, and a model that read the document as Markdown will write
+            # `*word*` meaning italics — which lands in the author's prose as
+            # literal asterisks (observed live). Narrow on purpose: a lone
+            # asterisk or underscore can be legitimate text.
+            return Verdict(
+                False,
+                reason=(
+                    "the replacement contains Markdown emphasis or backticks, "
+                    "which would land as literal characters — the replacement is "
+                    "typed, not rendered. Reword it in plain text; formatting "
+                    "cannot be suggested."
+                ),
+            )
+        if "\t" in replacement or "\v" in replacement:
+            # The replacement is typed keystroke by keystroke, and the editor
+            # intercepts a typed tab as an indent command — observed live to
+            # truncate the replacement mid-word.
+            return Verdict(
+                False,
+                reason=(
+                    "a replacement cannot contain tab or line-break characters — "
+                    "they type as editor commands, not text. Use spaces, or leave "
+                    "a comment instead."
+                ),
+            )
+        with self._lock:
+            if self.budget is not None and self._accepted >= self.budget:
+                return Verdict(
+                    False,
+                    reason=f"the budget of {self.budget} comments is already used.",
+                )
+        try:
+            span, rung = anchors.resolve(self.doc_text, quote, rungs=anchors.STRICT_RUNGS)
+        except SpanError:
+            return Verdict(
+                False,
+                reason=(
+                    anchors.explain(self.doc_text, quote)
+                    + " A suggestion must quote the document exactly; it is never "
+                    "widened or fuzzily matched the way a comment's quote is."
+                ),
+            )
+        if span.start == 0 or self.doc_text[span.start - 1] in "\n\v":
+            # Probed live: typing over a selection whose left edge sits at a
+            # paragraph's first character lands the insertion at the end of the
+            # *previous* paragraph, and one starting right after a soft line
+            # break swallows the break into the deletion — displaced edits that
+            # verify as wrong tracked changes. Mid-line selections replace
+            # byte-exactly, so the boundary cases are refused, not worked around.
+            return Verdict(
+                False,
+                reason=(
+                    f"{span.quote[:50]!r} begins at the very start of a line, "
+                    "where the editor misplaces a typed replacement. Suggest a "
+                    "change that starts further into the line, or leave a "
+                    "comment there instead."
+                ),
+            )
+        with self._lock:
+            if span.quote in self._seen:
+                return Verdict(
+                    False,
+                    reason=(
+                        f"{span.quote[:50]!r} already has a comment or suggestion on "
+                        "it. Anchor to a different passage, or drop this one."
+                    ),
+                )
+            overlap = next(
+                (
+                    (s, e)
+                    for s, e in self._suggested_spans
+                    if span.start < e and s < span.end
+                ),
+                None,
+            )
+            if overlap:
+                return Verdict(
+                    False,
+                    reason=(
+                        f"{span.quote[:50]!r} overlaps a passage already being "
+                        "rewritten by another suggestion. Suggest disjoint edits."
+                    ),
+                )
+            self._seen.add(span.quote)
+            self._suggested_spans.append((span.start, span.end))
+            self._accepted += 1
+            self.rungs.append(rung)
+            self.suggestions.append((span.quote, replacement))
         return Verdict(True, quote=span.quote, rung=rung)
 
     # ---- 4-5: the editing pass -----------------------------------------------
@@ -179,7 +306,32 @@ class Submitter:
             fresh_tab=self.fresh_tab,
         )
 
+    def place_suggestions(self, page, tab: dict, doc_id: str):
+        """Type every queued suggestion, bottom of the document first, and verify.
+
+        Called once per run, after the last comment has posted: comments never
+        navigate a document containing our own edits, and each suggestion only
+        shifts offsets in the region already finished.
+        """
+        return post_mod.post_suggestions(
+            page,
+            doc_id,
+            tab,
+            self.suggestions,
+            port=self.cfg.port,
+            strategy=self.cfg.strategy,
+            fresh_tab=self.fresh_tab,
+        )
+
     def record(self, doc_id: str, result) -> None:
+        if getattr(result, "kind", "comment") == "suggestion":
+            # A suggestion has no Drive id and no body; the replacement is what
+            # was applied, and the row is the only record — there is no un-suggest.
+            ledger.record(
+                doc_id, None, result.quote, result.replacement or "", self.label,
+                kind="suggestion",
+            )
+            return
         ledger.record(doc_id, result.comment_id, result.quote, result.body, self.label)
 
     def note(self, text: str) -> None:

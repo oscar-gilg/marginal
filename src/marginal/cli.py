@@ -76,6 +76,20 @@ def _commenting(p, doc: bool = True) -> None:
     p.add_argument("--provider", choices=("auto", "anthropic", "openrouter"))
     _web_search_flags(p)
     p.add_argument(
+        "--suggestions",
+        dest="suggestions",
+        action="store_true",
+        default=None,
+        help="let the commenter propose suggested edits (tracked changes) as well",
+    )
+    p.add_argument(
+        "--no-suggestions",
+        dest="suggestions",
+        action="store_false",
+        default=None,
+        help="comments only, overriding a config that enables suggestions",
+    )
+    p.add_argument(
         "--no-critic",
         dest="critic",
         action="store_false",
@@ -112,7 +126,8 @@ def _colour(code: str, text: str) -> str:
 # Settings grouped the way the example config groups them, so the printed view and
 # the file being explained have the same shape.
 _GROUPS = (
-    ("what runs", ("mode", "model", "provider", "effort", "comments", "source", "schedule")),
+    ("what runs", ("mode", "model", "provider", "effort", "comments", "suggestions",
+                   "source", "schedule")),
     ("the editing pass", ("critic", "critic_model", "critic_effort", "critic_workers",
                           "min_words", "max_words", "word_ceiling")),
     ("browser", ("port", "profile", "headless", "strategy")),
@@ -248,9 +263,16 @@ def _report(run, pairs, notes, ceiling: int = 80) -> int:
         for q, b in pairs:
             print(f"\n  on {q!r}\n     {b}")
         return 0
-    print(f"\nposted {len(run.posted)}/{len(pairs)}")
+    for note in getattr(run, "notes", []):
+        print(f"  {note}")
+    print(f"\nposted {len(run.posted)}/{max(len(pairs), len(run.results))}")
     for r in run.results:
-        print(f"  {'✓' if r.ok else '✗'} {r.post_seconds:5.2f}s on {r.quote[:55]!r}")
+        mark = "✓" if r.ok else "✗"
+        if r.kind == "suggestion":
+            print(f"  {mark} {r.post_seconds:5.2f}s suggested on {r.quote[:45]!r}")
+            print(f"      → {r.replacement[:100] if r.ok else r.error}")
+            continue
+        print(f"  {mark} {r.post_seconds:5.2f}s on {r.quote[:55]!r}")
         print(f"      {r.body[:100] if r.ok else r.error}")
     # Against results as well as pairs: a comment that failed before it could be
     # posted has a Result and no pair, and comparing only against pairs made a run

@@ -148,6 +148,12 @@ class Config:
     # diverged silently — an agent could search because nothing stopped it, and the
     # api-mode commenter could not because it was given exactly one tool.
     web_search: bool = False
+    # Let the commenter propose suggested edits — tracked changes typed in the
+    # editor's Suggesting mode — alongside comments. Off by default: a suggestion
+    # edits the document, so the failure mode is worse than a misplaced comment,
+    # and it is only offered where the stricter anchoring it requires (no fuzzy or
+    # model rung) can hold. Both modes are told the same thing when it is on.
+    suggestions: bool = False
     # Searches per turn, on the direct Anthropic route. OpenRouter's `web` plugin
     # has no per-request equivalent — it caps results per search — so this does not
     # bind there, and a run says which it got rather than leaving the cap to look

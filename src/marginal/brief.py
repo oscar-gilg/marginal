@@ -103,12 +103,17 @@ def sections(
     budget: int,
     focus: str | None = None,
     prior: str = "",
+    suggestions: str = "",
 ) -> list[Section]:
     """The whole brief, in the order the commenter reads it.
 
     `handoff` is the one genuinely mode-specific sentence — "call this tool" against
     "run this command in a subagent" — and it is a parameter rather than a branch so
     that the difference is visible at the two call sites instead of buried here.
+
+    `suggestions` is the suggested-edits contract, carried only when the setting is
+    on: a capability granted to one mode belongs here so both are told the same
+    thing, and gating it inside `sections` means neither call site can forget.
     """
     ask = f"Leave at most {budget} comments on this document."
     if focus:
@@ -119,6 +124,8 @@ def sections(
         Section("contract", contract, system=True),
         Section("handoff", handoff, system=True),
     ]
+    if cfg.suggestions and suggestions:
+        out.append(Section("suggestions", suggestions, system=True))
     if cfg.web_search:
         out.append(Section("research", RESEARCH, system=True))
     out.append(Section("ask", ask))

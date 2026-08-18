@@ -253,7 +253,12 @@ def _post(
                 # revision baselines and wrote the "when is there a revision guard"
                 # rule in two places ten lines apart.
                 fresh_tab=sub.fresh_tab,
-            )
+            ) if pairs else Run(doc_id=doc_id, tab_id=tab["id"], strategy=cfg.strategy)
+            # After every comment, same rule as the pipeline: suggestions type last.
+            if sub.suggestions:
+                s_run = sub.place_suggestions(page, tab, doc_id)
+                run.results.extend(s_run.results)
+                run.notes.extend(s_run.notes)
         finally:
             page.close()
     for r in run.posted:
@@ -430,10 +435,24 @@ def _pipeline(
         page = None if dry_run else open_doc(doc_id, tab["id"], port=cfg.port)
         try:
             run_stages(tab, stream, page, results, pairs, sub)
+            # Suggestions type only after the last comment has posted: comments
+            # never navigate a document containing our own edits.
+            if page is not None and sub.suggestions:
+                s_run = sub.place_suggestions(page, tab, doc_id)
+                results.extend(s_run.results)
+                notes.extend(s_run.notes)
         finally:
             if page is not None:
                 page.close()
 
+    if dry_run and sub.suggestions:
+        notes.append(
+            f"suggestions: {len(sub.suggestions)} accepted (dry run: nothing typed)"
+        )
+        # Shown in full: a dry run exists to judge what would land, and a
+        # replacement is applied verbatim, so the preview must be verbatim too.
+        for quote, replacement in sub.suggestions:
+            notes.append(f"  would suggest on {quote!r}:\n    → {replacement}")
     notes.append(f"anchors: {sub.summary()}")
     notes.append(f"tokens: {usage.line()}")
     if dry_run or not results:
@@ -501,7 +520,13 @@ def post_batch(
     rejected.extend(notes)
     reported = len(notes)
     rejected.append(f"anchors: {sub.summary()}")
-    if dry_run or not pairs:
+    if dry_run and sub.suggestions:
+        rejected.append(
+            f"suggestions: {len(sub.suggestions)} accepted (dry run: nothing typed)"
+        )
+        for quote, replacement in sub.suggestions:
+            rejected.append(f"  would suggest on {quote!r}:\n    → {replacement}")
+    if dry_run or (not pairs and not sub.suggestions):
         # Reaching this with pairs in hand means `dry_run` — the other way into the
         # branch is `not pairs`. The editing pass runs in `_post`, which a dry run
         # never reaches, so what is printed is the wording before it is tightened.
@@ -521,6 +546,25 @@ def post_batch(
     # in exactly the mode where nobody is watching an API bill for it.
     rejected.append(f"tokens: {usage.line()}")
     return run, pairs, rejected
+
+
+# Appended to `submit_brief` only when suggestions are on. One batch for all of
+# them, deliberately: within one `post-batch` call they type bottom-up, so no
+# anchor is navigated across an edit already made — a guarantee that cannot hold
+# across separate calls.
+_SUGGEST_BRIEF = """
+# Suggested edits
+
+A suggested edit is an item with a `replacement` instead of a `comment`:
+
+    {"quote": "...", "replacement": "..."}
+
+The quote must match the document exactly — it is never widened or corrected the
+way a comment's quote is — and the replacement is typed verbatim, with no editing
+pass. Submit every suggested edit together, in ONE `post-batch` call, after the
+comments: within one call they are applied bottom of the document first, which is
+what keeps each one's anchor exact.
+"""
 
 
 def submit_brief(doc_id: str, token: str, cfg: Config, tab_id: str | None = None) -> str:
@@ -567,7 +611,7 @@ author's own sentence closest to the point the comment makes.
 Two attempts is usually enough. If a comment genuinely cannot be placed, say so and
 stop rather than anchoring it somewhere it does not belong — a comment on the wrong
 sentence is worse than no comment.
-""".strip()
+{_SUGGEST_BRIEF if cfg.suggestions else ""}""".strip()
 
 
 def context(
@@ -604,10 +648,18 @@ The subagent places the comment; it does not rewrite it. The editing pass for le
 and redundancy runs inside the posting command, on {cfg.critic_model}, so write the
 comment you mean and let it trim.
 """.strip()
+    if cfg.suggestions:
+        handoff += """
+
+Hand a suggested edit to a subagent the same way, giving it the quote and the
+replacement instead of a comment. Suggested edits are typed into the document at
+the end, so submit them as you go and expect no immediate change in the document.
+""".rstrip()
 
     parts = brief.sections(
         doc["title"], tab["text"], tab, cfg, reviewer.COMMENTER_CONTRACT, handoff,
         budget=cfg.comments, focus=focus, prior=_prior_threads(doc_id, token),
+        suggestions=reviewer.SUGGESTION_CONTRACT,
     )
     return brief.as_text(parts, FIGURE_CACHE / f"{doc_id}-{tab['id'] or 'only'}")
 

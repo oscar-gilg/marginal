@@ -75,6 +75,77 @@ SUBMIT_TOOL = {
     },
 }
 
+# The suggestion tool, offered only when `cfg.suggestions` is on. A second tool
+# rather than a `kind` field on `SUBMIT_TOOL`: the two have different required
+# fields, and leaving the comment tool byte-identical means a run with
+# suggestions off is indistinguishable from one before the feature existed.
+SUGGEST_TOOL = {
+    "name": "submit_suggestion",
+    "description": (
+        "Propose one suggested edit: a tracked change replacing the quoted passage. "
+        "The quote must match the document exactly; the replacement is applied "
+        "verbatim. Returns nothing if it was accepted, or what to fix if not."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "quote": {
+                "type": "string",
+                "description": (
+                    "The exact passage to replace, copied character for character."
+                ),
+            },
+            "replacement": {
+                "type": "string",
+                "description": "The full text that replaces the quote, final wording.",
+            },
+        },
+        "required": ["quote", "replacement"],
+    },
+}
+
+# Offered in both modes when `suggestions` is on, and only then — the section is
+# added by `brief.sections`, so neither mode can carry it while the other misses
+# it. Deliberately stricter than the comment contract about quoting: a comment's
+# quote is widened and corrected by whoever places it, a suggestion's never is.
+SUGGESTION_CONTRACT = """
+# Suggesting edits
+
+You may also propose **suggested edits**: tracked changes the author accepts or
+rejects in place. Use one where a concrete rewording says it better than a comment
+about the wording would — a suggestion carries the fix itself. Keep making
+comments for anything substantive: a point about reasoning, evidence or structure
+belongs in a comment, not silently rewritten into the text.
+
+For each suggested edit, give:
+
+  quote       — the exact passage to replace, copied character for character from
+the document. Unlike a comment's quote it is never widened or corrected: if it
+does not match the document exactly, it comes back to you.
+  replacement — the full text that replaces the quote. It is applied exactly as
+you write it — no editing pass touches it — so make it final. Stay within one
+paragraph, and use plain text only (no tabs). To delete words, quote a passage
+wide enough to contain them and write the replacement without them.
+
+Write the replacement in the author's own voice: keep their terminology, tense,
+register and phrasing habits, and change only what the edit is for. The result
+should read as if the author had written it themselves.
+
+The replacement is typed into the document as plain characters, not rendered:
+Markdown does not work here, and `*word*` lands as literal asterisks. It also
+carries no formatting of its own, so italics or bold inside the quoted passage
+are not reproduced — where formatting matters, quote around it or leave a
+comment instead.
+
+A suggested edit cannot begin at the very start of a paragraph or line — the
+editor misplaces it there. Start the quote at least one word in; for a line's
+opening words, leave a comment instead.
+
+A suggested edit counts toward the same budget as a comment. Suggestions are
+typed into the document at the end of the run; you will be told immediately if
+one cannot be placed.
+"""
+
 # The one genuinely mode-specific sentence in the brief: how to hand a comment over.
 # It sits beside the tool it describes so the two cannot say different things, and
 # agent mode's counterpart sits beside its CLI in `run.context` for the same reason.
@@ -161,7 +232,7 @@ def propose_stream(
     # whole brief is fixed for the run and is resent on every turn.
     parts = brief.sections(
         doc_title, doc_text, tab, cfg, COMMENTER_CONTRACT, SUBMIT_HANDOFF,
-        budget=n, focus=focus, prior=prior or "",
+        budget=n, focus=focus, prior=prior or "", suggestions=SUGGESTION_CONTRACT,
     )
     system, blocks = brief.as_blocks(parts)
     fixed = len(blocks) - 1
@@ -171,6 +242,8 @@ def propose_stream(
     # results inside the same reply, so there is nothing here to execute and
     # nothing below to change. The commenter's one submission channel is unchanged.
     tools = [SUBMIT_TOOL]
+    if cfg.suggestions:
+        tools.append(SUGGEST_TOOL)
     if cfg.web_search:
         tools.append(model.web_search_tool(cfg.web_search_max_uses))
         submitter.note(
@@ -250,11 +323,22 @@ def propose_stream(
         results, placed = [], []
         for call in calls:
             args = call.get("input") or {}
-            verdict = submitter.accept(args.get("quote", ""), args.get("comment", ""))
+            if call.get("name") == "submit_suggestion":
+                # Accepted suggestions are queued, not yielded: they type into the
+                # document after every comment has posted, bottom-up, which is the
+                # ordering that keeps every later anchor upstream of every edit.
+                verdict = submitter.accept_suggestion(
+                    args.get("quote", ""), args.get("replacement", "")
+                )
+                accepted_reply = "Accepted; it will be typed at the end of the run."
+            else:
+                verdict = submitter.accept(args.get("quote", ""), args.get("comment", ""))
+                accepted_reply = "Placed."
             if verdict.ok:
                 made += 1
                 dropped = 0
-                placed.append((verdict.quote, (args.get("comment") or "").strip()))
+                if call.get("name") != "submit_suggestion":
+                    placed.append((verdict.quote, (args.get("comment") or "").strip()))
             else:
                 dropped += 1
                 submitter.note(f"rejected a submission: {verdict.reason}")
@@ -262,7 +346,7 @@ def propose_stream(
                 {
                     "type": "tool_result",
                     "tool_use_id": call.get("id"),
-                    "content": "Placed." if verdict.ok else verdict.reason,
+                    "content": accepted_reply if verdict.ok else verdict.reason,
                     **({} if verdict.ok else {"is_error": True}),
                 }
             )
@@ -290,6 +374,25 @@ def vet(items: list, submitter) -> tuple[list[tuple[str, str]], list[str]]:
     for item in items:
         if not isinstance(item, dict):
             rejected.append(f"not an object: {item!r:.60}")
+            continue
+        if "replacement" in item:
+            # A suggested edit. Routed through the same `accept_suggestion` the
+            # API-mode tool call goes through, and queued on the submitter rather
+            # than returned: suggestions post after comments, bottom-up.
+            #
+            # Gated exactly as API mode gates the tool: with the setting off the
+            # capability does not exist, whichever mode is asking.
+            if not submitter.cfg.suggestions:
+                rejected.append(
+                    "suggested edits are not enabled for this run; pass "
+                    "--suggestions or set suggestions = true"
+                )
+                continue
+            verdict = submitter.accept_suggestion(
+                item.get("quote") or "", item.get("replacement") or ""
+            )
+            if not verdict.ok:
+                rejected.append(verdict.reason)
             continue
         comment = (item.get("comment") or item.get("body") or "").strip()
         verdict = submitter.accept(item.get("quote") or "", comment)

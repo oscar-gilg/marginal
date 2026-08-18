@@ -25,7 +25,8 @@ one.
 
 ```
 /marginal:setup
-/marginal:comment <doc-url> focus on the methodology, three at most
+/marginal:review <doc-url> focus on the methodology, three at most
+/marginal:review <doc-url> suggest rewordings for the clunky sentences
 /marginal:respond <doc-url>
 ```
 
@@ -33,8 +34,9 @@ one.
 checks it is signed into Google, and writes a config matching what it found. Run it
 once.
 
-`/marginal:comment` takes the document URL and then plain words — what to look for,
-how many to leave — rather than flags. `/marginal:respond` answers the replies and
+`/marginal:review` takes the document URL and then plain words rather than flags —
+the prompt says both what kind of feedback to give and in what form: margin
+comments, suggested edits, or both. `/marginal:respond` answers the replies and
 needs Google OAuth, which needs a client file: ask whoever sent you this for theirs,
 or run `/marginal:oauth` to make your own.
 
@@ -129,6 +131,34 @@ marginal post-batch <doc-url> --max-words 40 --critic-model claude-opus-5 --from
 marginal review     <doc-url> --web-search    # API mode, may look things up
 marginal context    <doc-url> --web-search    # agent mode, same instruction
 ```
+
+### Suggested edits
+
+`--suggestions` (or `suggestions = true` in the config) lets the commenter also
+propose **suggested edits** — tracked changes typed in the editor's Suggesting
+mode, which the author accepts or rejects in place. Off by default. A suggestion
+is a `{quote, replacement}` pair: the quote must match the document exactly (no
+fuzzy matching, no widening — a wrong anchor here edits the wrong sentence, so
+imprecise resolves as absent), and the replacement is applied verbatim, with no
+editing pass. Deletions are expressed as a wider replacement that omits the text.
+
+Suggestions post after every comment, bottom of the document first, so no anchor
+is ever navigated across an edit already made. Each one is verified by reading
+the document's tracked changes back from the docx export — exact halves or a
+loud failure. They share the comment budget, and both modes are offered the
+capability in the same words, through the brief.
+
+There is no un-suggest: a suggestion has no Drive id, so withdrawing one is done
+in the Docs UI. The ledger records each with `kind: "suggestion"` for the audit
+trail.
+
+Two known limits, both of which refuse loudly rather than guess: a suggestion
+may not begin at the very start of a paragraph or line (the editor misplaces a
+typed replacement there — leave a comment instead), and on a document already
+carrying *pending* suggestions, anchors downstream of them may fail to select
+(the caret traverses struck-through text that the character stream does not
+count). Accepting or rejecting the pending suggestions and rerunning clears the
+second.
 
 ## How it works
 

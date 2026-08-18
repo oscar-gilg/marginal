@@ -5,7 +5,7 @@ description: >
   Chrome profile, confirm it is signed into Google, and write a config that matches what is
   actually available. Argument $ARGUMENTS — an optional Google Doc URL, which lets the check
   prove the browser session by exporting that document rather than inferring it from a page
-  load. Run this once before `/marginal:comment`.
+  load. Run this once before `/marginal:review`.
 argument-hint: "[doc-url]"
 user-invocable: true
 ---
@@ -74,7 +74,7 @@ Report, in a couple of lines:
 - whether Google OAuth was found. Without it the document is read through the
   browser session, and `list`, `reply`, `respond` and `unpost` are unavailable.
   Adding it is one command: `marginal auth --account you@example.com`;
-- that `/marginal:comment <doc-url>` is the next thing to run.
+- that `/marginal:review <doc-url>` is the next thing to run.
 
 Do not present the missing key or the missing OAuth client as problems to fix.
 Both are supported paths, and the credential-free one is the reason this tool has

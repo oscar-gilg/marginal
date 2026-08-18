@@ -91,6 +91,8 @@ def test_the_key_codes_are_the_ones_the_platform_defines():
         "c": ("c", "KeyC", 67),
         "m": ("m", "KeyM", 77),
         "f": ("f", "KeyF", 70),
+        "z": ("z", "KeyZ", 90),
+        "Backspace": ("Backspace", "Backspace", 8),
     }
 
 
@@ -121,6 +123,37 @@ def test_modifiers_reach_both_halves_of_the_press():
     page.key("m", modifiers=cdp.META | cdp.ALT)
     for params in ws.params_for("Input.dispatchKeyEvent"):
         assert params["modifiers"] == cdp.META | cdp.ALT
+
+
+def test_typed_text_is_one_real_keypress_per_character():
+    # `type_text` exists because `Input.insertText` over a selection in Suggesting
+    # mode inserts without deleting the selection. It must therefore be keypresses
+    # all the way down — an implementation that fell back to insertText would look
+    # identical on a collapsed caret and corrupt every replacement.
+    page, ws = _page()
+    page.type_text("ab c")
+    assert "Input.insertText" not in ws.methods()
+    kinds = [p["type"] for p in ws.params_for("Input.dispatchKeyEvent")]
+    assert kinds == ["keyDown", "keyUp"] * 4
+
+
+def test_the_typed_character_rides_the_key_down_and_not_the_key_up():
+    # A pair that both carry the text inserts the character twice — and was observed
+    # live to wedge the editor's input pipeline, taking the whole session with it.
+    page, ws = _page()
+    page.type_text("x")
+    down, up = ws.params_for("Input.dispatchKeyEvent")
+    assert down["text"] == "x" and down["unmodifiedText"] == "x"
+    assert "text" not in up and "unmodifiedText" not in up
+
+
+def test_typed_punctuation_is_sent_even_without_a_key_code():
+    # Replacements are prose: commas, quotes and dashes must reach the editor, not
+    # be refused for lacking a KEYS entry the way `key()` refuses unknown names.
+    page, ws = _page()
+    page.type_text("–, ‘y’")
+    downs = [p for p in ws.params_for("Input.dispatchKeyEvent") if p["type"] == "keyDown"]
+    assert [p["text"] for p in downs] == ["–", ",", " ", "‘", "y", "’"]
 
 
 def test_a_native_command_reaches_the_key_down():

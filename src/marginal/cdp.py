@@ -34,6 +34,8 @@ KEYS = {
     "c": ("c", "KeyC", 67),
     "m": ("m", "KeyM", 77),
     "f": ("f", "KeyF", 70),
+    "z": ("z", "KeyZ", 90),
+    "Backspace": ("Backspace", "Backspace", 8),
 }
 
 
@@ -183,6 +185,43 @@ class Page:
     def insert_text(self, text: str) -> None:
         """One call for the whole string — never type character by character."""
         self.send("Input.insertText", {"text": text})
+
+    def type_text(self, text: str) -> None:
+        """Type text as real keypresses, one keyDown/keyUp pair per character.
+
+        The slow spelling of `insert_text`, kept separate because the two are not
+        interchangeable over a selection in Suggesting mode: `Input.insertText`
+        inserts without deleting the selected text, so the "replacement" and the
+        text it replaced would both end up in the document. A real keypress
+        replaces the selection exactly — byte for byte, where Backspace and Delete
+        both suggest-delete one extra character (Docs trims the space next to a
+        word-shaped selection). Verified against a live document; see
+        `docs_ui.suggest_edit`.
+        """
+        for ch in text:
+            is_alnum = ch.isascii() and ch.isalnum()
+            code = ""
+            if ch.isascii() and ch.isalpha():
+                code = f"Key{ch.upper()}"
+            elif ch.isdigit():
+                code = f"Digit{ch}"
+            elif ch == " ":
+                code = "Space"
+            down = {
+                "type": "keyDown",
+                "key": ch,
+                "code": code,
+                "windowsVirtualKeyCode": ord(ch.upper()) if is_alnum else 0,
+                "nativeVirtualKeyCode": ord(ch.upper()) if is_alnum else 0,
+                "text": ch,
+                "unmodifiedText": ch,
+            }
+            # The keyUp must not carry text: a pair that both carry it inserts the
+            # character twice and was observed to wedge the editor's input pipeline.
+            up = {k: v for k, v in down.items() if k not in ("text", "unmodifiedText")}
+            up["type"] = "keyUp"
+            self.send("Input.dispatchKeyEvent", down)
+            self.send("Input.dispatchKeyEvent", up)
 
     def bring_to_front(self) -> None:
         """Clipboard reads require a focused document."""

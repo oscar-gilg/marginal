@@ -13,8 +13,15 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 
 from . import gdocs, ledger
-from .cdp import Page
-from .docs_ui import post_comment, resolve_quote, select_span
+from .cdp import META, Page
+from .docs_ui import (
+    SuggestNotReady,
+    post_comment,
+    resolve_quote,
+    select_span,
+    set_mode,
+    suggest_edit,
+)
 
 
 @dataclass
@@ -27,6 +34,10 @@ class Result:
     error: str | None = None
     select_events: int = 0
     post_seconds: float = 0.0
+    # "comment" or "suggestion". A suggestion's `body` is its rationale (may be
+    # empty); the edit itself is `quote` -> `replacement`.
+    kind: str = "comment"
+    replacement: str | None = None
 
 
 @dataclass
@@ -35,6 +46,9 @@ class Run:
     tab_id: str | None
     strategy: str
     results: list[Result] = field(default_factory=list)
+    # Run-level facts that belong to no single result — a mode that could not be
+    # restored, a stream that drifted from the expected transform. Never silent.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def posted(self) -> list[Result]:
@@ -46,6 +60,7 @@ class Run:
             "tab_id": self.tab_id,
             "strategy": self.strategy,
             "results": [asdict(r) for r in self.results],
+            "notes": list(self.notes),
         }
 
 
@@ -283,7 +298,10 @@ def verify(run: Run, before: set, read_comments) -> Run:
     # unrelated one — a collaborator commenting while the run is in flight — satisfy
     # the wait, ending the backoff before our own comment had propagated and
     # reporting a live comment as missing.
-    want = Counter(r.body.strip() for r in run.results if r.ok)
+    # Suggestions in a mixed run were already verified against the document's
+    # tracked changes; matching them here against the *comments* would fail every
+    # one for lacking a comment body.
+    want = Counter(r.body.strip() for r in run.results if r.ok and r.kind == "comment")
 
     def _outstanding(new: list[dict]) -> int:
         have = Counter(c["body"] for c in new)
@@ -302,7 +320,7 @@ def verify(run: Run, before: set, read_comments) -> Run:
     # post and hiding one that landed wrong.
     unclaimed = list(new)
     for r in run.results:
-        if not r.ok:
+        if not r.ok or r.kind != "comment":
             continue
         # Within the comments carrying our body, prefer the one anchored where this
         # result expected to land. Body alone is not an identity: two comments can
@@ -326,6 +344,283 @@ def verify(run: Run, before: set, read_comments) -> Run:
             where = f"comment {mine['id']}" if mine["id"] else "the comment"
             r.error = f"anchor mismatch ({where} is live and wrong)"
 
+    return run
+
+
+# --- suggested edits ---------------------------------------------------------
+#
+# A suggestion is posted like a comment — navigate, select, act — but the act is
+# typing in Suggesting mode, and verification reads the document's tracked
+# changes rather than its comments. The docx export is the one source that can
+# see a tracked change (the Docs API cannot create one and `list_comments`
+# cannot see one), so suggestion verification always goes through the export,
+# whichever source the run reads its text from.
+
+
+def suggestion_state_reader(port: int, doc_id: str, tab_id: str | None = None):
+    """Return () -> (live_stream, sites) from one docx export.
+
+    One export serves both questions verification asks — what does the stream say
+    now, and which tracked changes exist — so they can never disagree with each
+    other. Runs on a scratch tab for the same reason `browser_reader` does: the
+    export navigates, and Docs bounces that navigation into a reload that would
+    discard the driven tab's state.
+    """
+    from . import browser_source
+
+    def read() -> tuple[str, list[dict]]:
+        browser_source.invalidate(doc_id)
+        scratch = Page.open(f"https://docs.google.com/document/d/{doc_id}/edit", port=port)
+        try:
+            blob = browser_source.export(scratch, doc_id, "docx", tab_id=tab_id)
+        finally:
+            scratch.close()
+        return (
+            browser_source.text_from_docx(blob),
+            browser_source.suggestions_from_docx(blob),
+        )
+
+    return read
+
+
+def post_suggestion_one(
+    page: Page, tab: dict, quote: str, replacement: str, strategy: str,
+    attempts: int = SELECT_ATTEMPTS,
+    fresh_tab=None,
+) -> Result:
+    """Type one suggested replacement over `quote`. `ok` is provisional until verified.
+
+    The same retry boundary as `post_one`, moved one act later: selection and the
+    mode probe are retried (`SuggestNotReady` promises nothing was typed), and the
+    first typed character is terminal — a typing failure may have half-applied the
+    edit, and repeating it could apply it twice.
+
+    Re-resolution here is verbatim-only by construction (`resolve_quote`): however
+    the quote was anchored at accept time, the text actually edited must appear
+    exactly once in the current stream, or the suggestion is refused.
+    """
+    r = Result(quote=quote, body="", ok=False, kind="suggestion", replacement=replacement)
+    for attempt in range(1, attempts + 1):
+        try:
+            active_tab = fresh_tab() if fresh_tab is not None else tab
+            span = resolve_quote(active_tab["text"], quote)
+            r.quote = span.quote
+        except Exception as e:
+            r.error = f"{type(e).__name__}: {e}"
+            return r
+        if span.start == 0 or active_tab["text"][span.start - 1] in "\n\v":
+            # Checked at accept time too, but the document may have changed since:
+            # an edit upstream can move a mid-line quote onto a paragraph or
+            # soft-line-break boundary, where a typed replacement lands displaced.
+            # Refused before anything is typed.
+            r.error = (
+                "the quote now begins at the very start of a line, where a "
+                "typed replacement lands displaced; refused before typing"
+            )
+            return r
+        try:
+            t0 = time.perf_counter()
+            r.select_events = suggest_edit(
+                page, span, replacement, active_tab["paragraphs"], strategy,
+                text=active_tab["text"],
+            )
+        except SuggestNotReady as e:
+            r.error = f"{type(e).__name__}: {e}"
+            if attempt < attempts:
+                time.sleep(0.8 * attempt)
+            continue
+        except Exception as e:
+            r.error = (
+                f"{type(e).__name__}: {e} — typing had begun; the edit may be partly "
+                "applied. Check the document before suggesting this again."
+            )
+            return r
+        r.post_seconds = round(time.perf_counter() - t0, 3)
+        r.ok = True
+        r.error = None
+        return r
+    return r
+
+
+def _canary(r: Result, read_state, before: Counter, baseline_stream: str) -> str:
+    """Classify what the first typed suggestion actually did.
+
+    Three answers: 'suggested' (a tracked change with our exact halves exists),
+    'edited' (the replacement is in the live stream with no tracked change — the
+    typing was a real edit, the worst failure this feature has), or 'unknown'
+    (the export shows neither yet; it lags, so absence is not evidence of anything).
+    """
+    for wait in (1.5, 4.0):
+        stream, sites = read_state()
+        fresh = Counter((s["deleted"], s["inserted"]) for s in sites) - before
+        if (r.quote, r.replacement) in fresh:
+            return "suggested"
+        # The replacement text appearing where no insertion is tracked means the
+        # selection was replaced for real. Guarded on the baseline not already
+        # containing it, or any replacement that echoes existing text would abort.
+        if (
+            r.replacement not in baseline_stream
+            and r.replacement in stream
+            and not any(r.replacement in i for _, i in fresh)
+        ):
+            return "edited"
+        time.sleep(wait)
+    return "unknown"
+
+
+def post_suggestions(
+    page: Page,
+    doc_id: str,
+    tab: dict,
+    pairs: list[tuple[str, str]],
+    port: int,
+    strategy: str = "paragraph",
+    read_state=None,
+    fresh_tab=_AUTO_FRESHEN,
+    token: str | None = None,
+) -> Run:
+    """Post (quote, replacement) pairs as suggested edits, bottom of the document first.
+
+    Descending start-offset order is the coordinate-space discipline: a suggestion
+    shifts every offset after itself (inserted text is live, deleted text leaves),
+    so posting bottom-up means no quote is ever navigated to across one of our own
+    edits — each remaining quote sits strictly before everything already changed.
+
+    After the first suggestion is typed, a canary read classifies what actually
+    happened before any further typing: a first keystroke that turned out to be a
+    real edit aborts the whole batch, undoes best-effort, and says so loudly.
+    """
+    if read_state is None:
+        read_state = suggestion_state_reader(port, doc_id, tab_id=tab.get("id"))
+    if fresh_tab is _AUTO_FRESHEN:
+        fresh_tab = api_tab_refresher(doc_id, token, tab) if token is not None else None
+
+    run = Run(doc_id=doc_id, tab_id=tab.get("id"), strategy=strategy)
+
+    # Resolve everything up front against one stream, for the ordering. Posting
+    # re-resolves against a fresh read anyway; a pair that fails here is reported
+    # rather than posted in whatever order it happened to arrive.
+    ordered: list[tuple[int, str, str]] = []
+    for quote, replacement in pairs:
+        try:
+            span = resolve_quote(tab["text"], quote)
+        except Exception as e:
+            run.results.append(Result(
+                quote=quote, body="", ok=False, kind="suggestion",
+                replacement=replacement, error=f"{type(e).__name__}: {e}",
+            ))
+            continue
+        ordered.append((span.start, span.quote, replacement))
+    ordered.sort(key=lambda t: t[0], reverse=True)
+    if not ordered:
+        return run
+
+    baseline_stream, baseline_sites = read_state()
+    before = Counter((s["deleted"], s["inserted"]) for s in baseline_sites)
+
+    try:
+        previous_mode = set_mode(page, "suggesting")
+    except Exception as e:
+        for _, quote, replacement in ordered:
+            run.results.append(Result(
+                quote=quote, body="", ok=False, kind="suggestion", replacement=replacement,
+                error=f"suggesting mode could not be confirmed: {e}",
+            ))
+        return run
+
+    aborted = None
+    try:
+        first_typed = True
+        for _, quote, replacement in ordered:
+            if aborted:
+                run.results.append(Result(
+                    quote=quote, body="", ok=False, kind="suggestion",
+                    replacement=replacement, error=f"not attempted: {aborted}",
+                ))
+                continue
+            r = post_suggestion_one(
+                page, tab, quote, replacement, strategy, fresh_tab=fresh_tab
+            )
+            run.results.append(r)
+            if r.ok and first_typed:
+                first_typed = False
+                verdict = _canary(r, read_state, before, baseline_stream)
+                if verdict == "edited":
+                    # The keystrokes were a real edit despite the confirmed mode
+                    # probe. One undo, best-effort, then stop touching the document.
+                    page.key("z", META)
+                    r.ok = False
+                    r.error = (
+                        "typed as a REAL EDIT, not a suggestion — one undo was sent, "
+                        f"but check the document: {quote[:60]!r} may read "
+                        f"{replacement[:60]!r}. Run aborted before any further typing."
+                    )
+                    aborted = "an earlier suggestion typed as a real edit"
+                # 'unknown' is not evidence: the export lags. The verification
+                # pass below is the judge; only positive evidence aborts.
+    finally:
+        try:
+            set_mode(page, previous_mode)
+        except Exception as e:
+            run.notes.append(
+                f"the editor could not be switched back to {previous_mode} mode ({e}); "
+                "switch it back by hand or the next human edit becomes a suggestion"
+            )
+
+    return verify_suggestions(run, before, read_state)
+
+
+def verify_suggestions(run: Run, before: Counter, read_state) -> Run:
+    """Match every provisionally-typed suggestion against the document's tracked changes.
+
+    Exact halves or failure: a site whose deleted text merely *contains* the quote
+    means the editor recorded a different edit than the one asked for (or merged it
+    with an adjacent suggestion), and a suggestion that edits more or less than its
+    quote is a wrong anchor wearing a success face. `anchored` carries the deleted
+    text actually recorded, so a mismatch is reported with the wrong text in hand.
+    """
+    want = [r for r in run.results if r.ok]
+    stream, sites = "", []
+    for wait in (1.5, 4.0, 8.0):
+        stream, sites = read_state()
+        fresh = Counter((s["deleted"], s["inserted"]) for s in sites) - before
+        if all(fresh[(r.quote, r.replacement)] > 0 for r in want):
+            break
+        time.sleep(wait)
+
+    # Only sites beyond the baseline may verify anything: a pre-existing tracked
+    # change with the same halves is somebody else's edit, not proof ours landed.
+    remaining = Counter(before)
+    fresh_sites = []
+    for s in sites:
+        key = (s["deleted"], s["inserted"])
+        if remaining[key] > 0:
+            remaining[key] -= 1
+        else:
+            fresh_sites.append(s)
+    fresh = Counter((s["deleted"], s["inserted"]) for s in fresh_sites)
+    for r in want:
+        key = (r.quote, r.replacement)
+        if fresh[key] > 0:
+            fresh[key] -= 1
+            r.anchored = r.quote
+            continue
+        near = next(
+            (
+                s for s in fresh_sites
+                if r.quote in s["deleted"] and r.replacement in s["inserted"]
+            ),
+            None,
+        )
+        r.ok = False
+        if near is not None:
+            r.anchored = near["deleted"]
+            r.error = (
+                "the tracked change does not match the suggestion exactly "
+                f"(deleted {near['deleted'][:60]!r}); it is live and should be checked"
+            )
+        else:
+            r.error = "typed suggestion could not be read back"
     return run
 
 

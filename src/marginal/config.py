@@ -70,7 +70,12 @@ class Config:
     # writes the comments, `source = "api"` is where the document text is read from.
     # An agent-mode run can read through the API, and an api-mode run can read
     # through the browser.
-    mode: str = "api"  # api | agent
+    #
+    # "agent" is the default because it is the mode that needs nothing: most
+    # installs arrive through a coding agent that is already reading the document,
+    # and agent mode runs on that agent's subscription rather than a key. API mode
+    # is the opt-in for running this tool standalone.
+    mode: str = "agent"  # api | agent
     model: str = "claude-fable-5"
     # How hard the commenter thinks before each comment. None leaves the provider
     # default alone, which is what every run before this setting existed used;

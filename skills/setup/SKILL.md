@@ -67,9 +67,10 @@ This is a one-time step. The profile keeps its session afterwards.
 Report, in a couple of lines:
 
 - which invocation works, so the user can run it themselves;
-- whether a model API key was found. Without one this runs in **agent mode** — you
-  write the comments, Marginal places them — and the shortening pass is off,
-  so comments post at whatever length they were written;
+- whether a model API key was found. **Agent mode** — you write the comments,
+  Marginal places them — is the default either way; a key buys the shortening
+  pass and the option of API mode (`marginal review`), and without one the
+  shortening pass is off, so comments post at whatever length they were written;
 - whether Google OAuth was found. Without it the document is read through the
   browser session, and `list`, `reply`, `respond` and `unpost` are unavailable.
   Adding it is one command: `marginal auth --account you@example.com`;

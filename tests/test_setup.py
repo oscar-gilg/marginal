@@ -19,7 +19,7 @@ def test_no_credentials_at_all_still_produces_a_working_config():
     # The zero-friction path, and the reason this command exists: nothing
     # configured must still yield settings that run.
     settings = setup.preset(keys=[], accounts=[])
-    assert settings == {"source": "browser", "mode": "agent", "critic": False}
+    assert settings == {"source": "browser", "critic": False}
 
 
 def test_a_key_and_an_account_override_nothing():
@@ -32,14 +32,11 @@ def test_a_key_without_google_only_changes_where_the_text_is_read():
     assert setup.preset(keys=["OPENROUTER_API_KEY"], accounts=[]) == {"source": "browser"}
 
 
-def test_google_without_a_key_only_changes_who_writes():
-    # `critic` travels with `mode` here, and must: the shortening pass runs inside
-    # `post-batch`, so agent mode with no key would otherwise fail on every comment
-    # at the point it tries to tighten one.
-    assert setup.preset(keys=[], accounts=["me@example.com"]) == {
-        "mode": "agent",
-        "critic": False,
-    }
+def test_google_without_a_key_only_turns_the_critic_off():
+    # Agent mode is the default now, so a missing key changes nothing about who
+    # writes — but the shortening pass runs inside `post-batch`, so it would
+    # otherwise fail on every comment at the point it tries to tighten one.
+    assert setup.preset(keys=[], accounts=["me@example.com"]) == {"critic": False}
 
 
 @pytest.mark.parametrize(
@@ -244,9 +241,9 @@ def test_every_written_setting_carries_its_reason():
     # A generated config whose lines have no reason attached gets copied forward
     # long after the reason expired.
     rendered = setup.render(setup.preset(keys=[], accounts=[]))
-    for name in ("source", "mode", "critic"):
+    for name in ("source", "critic"):
         assert name in setup._WHY
-    assert rendered.count("#") >= 3 + 3  # header lines plus one reason per setting
+    assert rendered.count("#") >= 3 + 2  # header lines plus one reason per setting
 
 
 def test_the_config_path_the_command_writes_is_the_one_it_reports(tmp_path, monkeypatch, capsys):
@@ -411,7 +408,9 @@ def test_an_authenticated_user_gets_one_line_not_the_explanation(monkeypatch):
     out = setup._next_step(None, keys=["K"], accounts=["me@example.com"])
     assert "shipped with marginal" in out
     assert "100-user cap" not in out, "the full explanation is for people still deciding"
-    assert len(out.splitlines()) < 8
+    # The agent-mode next-step block is four lines on its own; the cap is about the
+    # OAuth explanation staying brief, not about that block.
+    assert len(out.splitlines()) < 11
 
 
 def test_an_authenticated_user_on_their_own_client_is_told_nothing(monkeypatch):

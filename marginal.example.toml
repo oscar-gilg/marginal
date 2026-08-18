@@ -14,8 +14,9 @@
 # comments, the second is where the text is read from, and any combination of the
 # two works.
 
-mode = "api"               # api: this tool calls a model. agent: a coding agent
-                           # writes and hands back a batch. `comment` runs whichever.
+mode = "agent"             # agent: a coding agent writes and hands back a batch —
+                           # needs no model API key. api: this tool calls a model
+                           # itself. `comment` runs whichever.
 model = "claude-fable-5"
 provider = "auto"          # caching and effort work on both routes
 # effort = "high"          # low | medium | high | xhigh | max. Unset: provider default

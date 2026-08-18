@@ -63,8 +63,8 @@ inside it.
 
 | You have | What runs | What it costs you |
 | --- | --- | --- |
-| Nothing but Chrome | `source = "browser"`, `mode = "agent"`, `critic = false` | Comments post at the length the agent wrote them, and half the commands are unavailable — see below |
-| A model API key | `mode = "api"` — this tool writes the comments, and the shortening pass runs | — |
+| Nothing but Chrome | `source = "browser"`, `critic = false` — agent mode, comments written by your coding agent | Comments post at the length the agent wrote them, and half the commands are unavailable — see below |
+| A model API key | the shortening pass runs, and `mode = "api"` (this tool writes the comments itself) becomes available | — |
 | Google OAuth too | `source = "api"` — a faster read, a revision check before each post, and every command | an OAuth client: one you were given, or ten minutes making your own |
 
 **What the first row cannot do.** `comment`, `review`, `context`, `submit-brief`
@@ -83,10 +83,11 @@ Google OAuth client — see below.
 file next to it. `marginal config` prints what a run here would use and where
 each value came from.
 
-The middle row is the one worth understanding. In **agent mode** a coding agent
-already reading the document writes the comments and Marginal places them, so
-nothing here calls a model and no key is needed — it runs on whatever subscription
-the agent has. The exception is the shortening pass, which runs inside
+**Agent mode is the default.** A coding agent already reading the document writes
+the comments and Marginal places them, so nothing here calls a model and no key is
+needed — it runs on whatever subscription the agent has. A key buys two things:
+the shortening pass, and the option of `mode = "api"`, where this tool calls a
+model itself. The shortening pass runs inside
 `post-batch` on this tool's side, deliberately: it used to live in a *prompt*, and
 any caller that reached `post-batch` without reading that prompt posted unedited
 comments. With no key there is nothing to run it with, so `setup` turns it off

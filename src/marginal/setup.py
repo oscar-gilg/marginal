@@ -10,11 +10,14 @@ So this command checks what is present rather than demanding what is missing, an
 writes the configuration those findings imply:
 
     Google OAuth?     no -> source  = "browser"   read and verify through Chrome
-    a model API key?  no -> mode    = "agent"     a coding agent writes the comments
-                            critic  = false       and nothing here calls a model
+    a model API key?  no -> critic  = false       nothing here calls a model
 
-That last line is the one place a missing key costs something real, and it is said
-out loud rather than discovered later. `critic` is the shortening pass, and it runs
+Agent mode — a coding agent writes the comments and this tool places them — is the
+default whether or not a key is present, so `mode` is no longer setup's decision;
+a key buys the shortening pass and the *option* of `mode = "api"`.
+
+That critic line is the one place a missing key costs something real, and it is
+said out loud rather than discovered later. `critic` is the shortening pass, and it runs
 inside `post-batch` — on this tool's side, not the agent's — precisely so that an
 agent taking a shortcut cannot skip it. With no key there is nothing to run it
 with, so comments post at whatever length the agent wrote them.
@@ -290,7 +293,9 @@ def preset(keys: list[str], accounts: list[str]) -> dict[str, object]:
     if not accounts:
         settings["source"] = "browser"
     if not keys:
-        settings["mode"] = "agent"
+        # `mode = "agent"` is already the default, so only the critic needs saying:
+        # it runs inside `post-batch` and would otherwise fail on every comment at
+        # the point it tries to tighten one.
         settings["critic"] = False
     return settings
 
@@ -301,8 +306,6 @@ def preset(keys: list[str], accounts: list[str]) -> dict[str, object]:
 _WHY = {
     "source": "no Google OAuth here, so the document is read through the browser's "
     "own session. `marginal auth ...` and this can go back to \"api\".",
-    "mode": "no model API key here, so a coding agent writes the comments and this "
-    "tool places them.",
     "critic": "the shortening pass calls a model, and there is no key to call one "
     "with. Comments post at the length they were written.",
 }
@@ -414,13 +417,14 @@ NEEDS_OAUTH = ("read", "list", "post", "reply", "unpost", "respond")
 
 def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str:
     doc = doc_url or "<doc-url>"
+    first = (
+        f"Ready, in agent mode. Ask your coding agent to run:\n"
+        f"  {invocation()} comment {doc} -n 3      # prints the brief and the document\n"
+        f"and to post what it writes back with `{invocation()} post-batch`."
+    )
     if keys:
-        first = f"Ready. Try:  {invocation()} comment {doc} -n 3"
-    else:
-        first = (
-            f"Ready, in agent mode. Ask your coding agent to run:\n"
-            f"  {invocation()} comment {doc} -n 3      # prints the brief and the document\n"
-            f"and to post what it writes back with `{invocation()} post-batch`."
+        first += (
+            f"\nOr have this tool call a model itself:  {invocation()} review {doc} -n 3"
         )
     if accounts:
         # Already authenticated, so the long explanation is behind them. One line,

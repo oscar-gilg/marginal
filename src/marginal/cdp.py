@@ -281,6 +281,25 @@ class Page:
             time.sleep(interval)
         return False
 
+    @classmethod
+    def reattach(cls, target_id: str, port: int = 9222) -> "Page":
+        """Attach to a tab this tool opened earlier, by the id it recorded.
+
+        By id, never by URL: the id names exactly the tab a previous run left for
+        this purpose. Raises LookupError if Chrome no longer has it.
+        """
+        for t in targets(port):
+            if t.get("id") == target_id and t.get("webSocketDebuggerUrl"):
+                return cls._connect(t, port)
+        raise LookupError(f"tab {target_id} is gone")
+
+    def detach(self) -> None:
+        """Close the websocket and leave the tab open, for the next process."""
+        try:
+            self.ws.close()
+        except Exception:
+            pass
+
     def close(self) -> None:
         """Close the websocket *and* the browser tab.
 

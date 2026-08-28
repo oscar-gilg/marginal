@@ -463,51 +463,105 @@ def test_usage_and_json_stay_serialisable():
     assert json.dumps({f"{p}:{m}": v for (p, m), v in model.dead_providers().items()}) is not None
 
 
-def test_post_retries_a_busy_provider_then_succeeds(monkeypatch):
-    # Five posts at once put two critic calls into a 429/5xx, and `_post` used to
-    # fail on the first one. A busy provider is retried; nothing else is.
-    import io
 
-    calls = []
-    waits = []
+def _busy(code):
+    def raiser(*a, **k):
+        raise model.ModelError(f"HTTP {code} from x: busy")
+    return raiser
 
-    def urlopen(req, timeout=600):
-        calls.append(req)
-        if len(calls) < 3:
-            raise urllib.error.HTTPError(
-                "https://x", 529, "overloaded", {}, io.BytesIO(b'{"type":"overloaded_error"}')
-            )
-        return io.BytesIO(b'{"ok": true}')
 
-    monkeypatch.setattr(model.urllib.request, "urlopen", urlopen)
+def test_a_busy_route_is_retried_then_succeeds(monkeypatch):
+    # Five posts at once put two critic calls into a 429/5xx, and one used to fail
+    # the call outright.
+    calls, waits = [], []
+    monkeypatch.setattr(model, "_DEAD", {}, raising=False)
     monkeypatch.setattr(model.time, "sleep", waits.append)
-    assert model._post("https://x", {}, {}) == {"ok": True}
-    assert len(calls) == 3 and waits == list(model._RETRY_WAITS)
+    monkeypatch.setattr(model, "load_env", lambda: None)
+
+    def anthropic(*a, **k):
+        calls.append("a")
+        if len(calls) < 3:
+            raise model.ModelError("HTTP 529 from x: overloaded")
+        return {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"}
+
+    monkeypatch.setattr(model, "_anthropic", anthropic)
+    assert model.converse("s", [], provider="anthropic") == "ok"
+    assert calls == ["a", "a", "a"] and waits == list(model._RETRY_WAITS)
 
 
-def test_post_does_not_retry_a_permanent_error(monkeypatch):
-    import io
+def test_auto_tries_the_other_route_before_waiting(monkeypatch):
+    # The wait sits around the pair: a busy Anthropic falls through to OpenRouter
+    # at once, and only when both are busy does the call sleep.
+    order, waits = [], []
+    monkeypatch.setattr(model, "_DEAD", {}, raising=False)
+    monkeypatch.setattr(model.time, "sleep", waits.append)
+    monkeypatch.setattr(model, "load_env", lambda: None)
+    monkeypatch.setattr(model, "_anthropic", lambda *a, **k: order.append("a") or _busy(529)())
 
-    calls = []
+    def openrouter(*a, **k):
+        order.append("o")
+        return {"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn"}
 
-    def urlopen(req, timeout=600):
-        calls.append(req)
-        raise urllib.error.HTTPError("https://x", 401, "unauthorized", {}, io.BytesIO(b"nope"))
-
-    monkeypatch.setattr(model.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(model.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("slept")))
-    with pytest.raises(model.ModelError):
-        model._post("https://x", {}, {})
-    assert len(calls) == 1
+    monkeypatch.setattr(model, "_openrouter", openrouter)
+    assert model.converse("s", [], provider="auto") == "ok"
+    assert order == ["a", "o"] and waits == [], "no sleep before the fallback route"
 
 
-def test_post_gives_up_after_the_retry_budget(monkeypatch):
-    import io
-
-    def urlopen(req, timeout=600):
-        raise urllib.error.HTTPError("https://x", 429, "rate limited", {}, io.BytesIO(b"slow down"))
-
-    monkeypatch.setattr(model.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(model.time, "sleep", lambda s: None)
+def test_auto_waits_only_when_both_routes_are_busy(monkeypatch):
+    order, waits = [], []
+    monkeypatch.setattr(model, "_DEAD", {}, raising=False)
+    monkeypatch.setattr(model.time, "sleep", waits.append)
+    monkeypatch.setattr(model, "load_env", lambda: None)
+    monkeypatch.setattr(model, "_anthropic", lambda *a, **k: order.append("a") or _busy(429)())
+    monkeypatch.setattr(model, "_openrouter", lambda *a, **k: order.append("o") or _busy(429)())
     with pytest.raises(model.ModelError, match="429"):
-        model._post("https://x", {}, {})
+        model.converse("s", [], provider="auto")
+    assert order == ["a", "o"] * 3 and waits == list(model._RETRY_WAITS)
+
+
+def test_a_permanent_error_is_not_retried(monkeypatch):
+    calls = []
+    monkeypatch.setattr(model, "load_env", lambda: None)
+    monkeypatch.setattr(model.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("slept")))
+    monkeypatch.setattr(model, "_anthropic", lambda *a, **k: calls.append(1) or _busy(401)())
+    with pytest.raises(model.ModelError, match="401"):
+        model.converse("s", [], provider="anthropic")
+    assert calls == [1]
+
+
+def test_a_forbidden_process_refuses_every_model_call(monkeypatch):
+    monkeypatch.setattr(model, "_FORBIDDEN", None)
+    called = []
+    monkeypatch.setattr(model, "_anthropic", lambda *a, **k: called.append(1))
+    model.forbid("agent mode makes no model calls")
+    try:
+        with pytest.raises(model.ModelError, match="agent mode makes no model calls"):
+            model.converse("s", [], provider="anthropic")
+    finally:
+        model.forbid(None)
+    assert called == []
+
+
+def test_agent_mode_commands_forbid_model_calls_unless_opted_in(monkeypatch, tmp_path):
+    # The guarantee is set by the CLI, per command, from the two opt-in settings.
+    from marginal import cli, run as runmod
+
+    seen = []
+    monkeypatch.setattr(model, "forbid", lambda reason: seen.append(reason))
+    monkeypatch.setattr(runmod, "submit_brief", lambda *a, **k: "")
+    monkeypatch.setattr(cli, "_token", lambda *a, **k: None, raising=False)
+    monkeypatch.chdir(tmp_path)
+    doc = "1" * 25
+    for argv, local, expect in (
+        (["submit-brief", doc], "", True),
+        (["submit-brief", doc, "--critic", "api"], "", False),
+        (["submit-brief", doc], "reconcile_anchors = true\n", False),
+    ):
+        (tmp_path / "marginal.toml").write_text(local)
+        seen.clear()
+        try:
+            cli._main(argv)
+        except SystemExit:
+            pass
+        # `forbid(None)` on the way out is the reset, not a guard.
+        assert bool([r for r in seen if r]) is expect, (argv, seen)

@@ -178,27 +178,12 @@ def load_env(path: Path | None = None) -> None:
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
-# Waits before each retry of a busy provider. Two retries: a 429 or 5xx is the
-# provider being busy for seconds, not minutes, and a third wait would mostly
-# delay the fallback route that `auto` has ready.
+# Waits before each retry of a busy route. Two retries: a 429 or 5xx is the
+# provider being busy for seconds, not minutes. The wait sits *around* the whole
+# dispatch, not inside `_post`: under `provider = "auto"` a busy Anthropic should
+# fall through to OpenRouter at once, and only when both are busy is waiting the
+# right move. Waiting first cost up to 14s per call before the fallback was tried.
 _RETRY_WAITS = (2.0, 5.0)
-
-
-def _post(url: str, body: dict, headers: dict, timeout: int = 600) -> dict:
-    req = urllib.request.Request(
-        url, data=json.dumps(body).encode(), headers={**headers, "content-type": "application/json"}
-    )
-    for wait in (*_RETRY_WAITS, None):
-        try:
-            return _post_once(req, url, timeout)
-        except ModelError as e:
-            # A rate limit or a 5xx is transient; it used to fail the call outright,
-            # and with five posts running at once that was enough to lose the
-            # critic on two of them. Anything else is not improved by waiting.
-            if wait is None or not _is_busy(e):
-                raise
-            time.sleep(wait)
-    raise AssertionError("unreachable")
 
 
 def _is_busy(error: ModelError) -> bool:
@@ -206,7 +191,26 @@ def _is_busy(error: ModelError) -> bool:
     return " 429 " in text or any(f" 5{d} " in text for d in ("00", "02", "03", "04", "29"))
 
 
-def _post_once(req: urllib.request.Request, url: str, timeout: int) -> dict:
+def _retrying(call):
+    """Run `call`, retrying on a busy route; anything else fails at once."""
+    for wait in (*_RETRY_WAITS, None):
+        try:
+            return call()
+        except Refusal:
+            raise
+        except ModelError as e:
+            # With five posts running at once, one 429 used to be enough to lose
+            # the critic on two of them. Anything not busy is not improved by waiting.
+            if wait is None or not _is_busy(e):
+                raise
+            time.sleep(wait)
+    raise AssertionError("unreachable")
+
+
+def _post(url: str, body: dict, headers: dict, timeout: int = 600) -> dict:
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode(), headers={**headers, "content-type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
@@ -576,14 +580,21 @@ def exchange(
     the whole document on every turn — uncached, comment five would pay for the
     document five times.
     """
+    if _FORBIDDEN:
+        raise ModelError(_FORBIDDEN)
     load_env()
     args = (system, messages, model, max_tokens, effort, cache, usage, tools)
     if provider == "anthropic":
-        return _anthropic(*args)
+        return _retrying(lambda: _anthropic(*args))
     if provider == "openrouter":
-        return _openrouter(*args)
+        return _retrying(lambda: _openrouter(*args))
     if provider != "auto":
         raise ValueError(f"unknown provider {provider!r}")
+    return _retrying(lambda: _auto(args, model))
+
+
+def _auto(args: tuple, model: str) -> dict:
+    """Anthropic first, OpenRouter at once if that fails; the caller retries the pair."""
     # Skip a route already known to be permanently unavailable. An unfunded key
     # answers in ~0.25s, which across a run's model calls is seconds of latency and
     # a pile of requests that were never going to succeed.
@@ -594,8 +605,25 @@ def exchange(
             raise
         except ModelError as e:
             _remember_dead("anthropic", model, e)
-    # Direct access unavailable (no key, no credit) — same model, other route.
+    # Direct access unavailable (no key, no credit, or busy) — same model, other route.
     return _openrouter(*args)
+
+
+_FORBIDDEN: str | None = None
+
+
+def forbid(reason: str | None) -> None:
+    """Refuse every model call for the rest of this process, with `reason`.
+
+    Agent mode's guarantee. Its commands make no model call by default, and the
+    settings that would add one (`critic = "api"`, `reconcile_anchors = true`) are
+    explicit opt-ins — but "no path currently calls a model" is a fact about today's
+    code, and this turns it into a check: a future path that reaches `exchange`
+    without those settings fails loudly, naming the flag, instead of quietly
+    spending. None lifts it.
+    """
+    global _FORBIDDEN
+    _FORBIDDEN = reason
 
 
 def converse(

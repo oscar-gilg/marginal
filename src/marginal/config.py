@@ -142,6 +142,14 @@ class Config:
     # cheaper model at low effort is the right trade, and it is reached rarely.
     fallback_model: str = "claude-sonnet-5"
     fallback_effort: str = "low"
+    # Keep the document's editor tab open between posts. Every `post-batch` used to
+    # open a fresh tab and wait for Docs to render it — three to five seconds per
+    # comment in agent mode, where each comment is its own process. With this on,
+    # the tab is left open and recorded, and the next post on the same document
+    # re-attaches to it under the same lock. A tab older than `tab_ttl` seconds is
+    # closed and replaced, so an idle profile is not holding the document forever.
+    keep_tab: bool = True
+    tab_ttl: int = 900
     # Ask a model where an unplaceable quote belongs. Off by default: agent mode is
     # the path that needs it and is also the path with no API key, so there the work
     # is done by the submitting subagent instead. Turn it on if you have a key and
@@ -339,6 +347,7 @@ def _validate(cfg: Config) -> Config:
         "max_words",
         "word_ceiling",
         "web_search_max_uses",
+        "tab_ttl",
     ):
         value = getattr(cfg, name)
         # `isinstance(True, int)` is True and TOML floats pass `< 1`, so both would

@@ -44,7 +44,9 @@ from __future__ import annotations
 import dataclasses
 
 import fcntl
+import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from queue import Queue
@@ -64,6 +66,7 @@ from . import (
     submission,
 )
 from . import post as post_mod
+from .cdp import Page
 from .config import Config
 from .docs_ui import open_doc
 from .post import Result, Run, post_many
@@ -202,6 +205,59 @@ def browser_lock(doc_id: str):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+@contextmanager
+def editor(doc_id: str, tab_id: str | None, cfg: Config):
+    """The document's editor tab: re-attached if a previous post left one, else opened.
+
+    Call under `browser_lock`. On exit the tab is left open and recorded for the
+    next process when `cfg.keep_tab`, or closed. Reuse is refused — and the old tab
+    closed — when the record names a different document tab, is older than
+    `tab_ttl`, or the editor does not answer: a fresh tab costs seconds, a stale one
+    could cost an anchor.
+    """
+    record = LOCK_DIR / f"{doc_id}.tab"
+    page = None
+    try:
+        held = json.loads(record.read_text()) if record.exists() else None
+    except (OSError, ValueError):
+        held = None
+    if held:
+        fresh = time.time() - held.get("at", 0) < cfg.tab_ttl
+        same = held.get("tab_id") == tab_id
+        try:
+            page = Page.reattach(held["target_id"], port=cfg.port) if fresh and same else None
+            if page is not None and not page.wait_until(
+                "!!document.querySelector('.kix-appview-editor')", timeout=5
+            ):
+                page.close()
+                page = None
+        except Exception:
+            page = None
+        if page is None:
+            try:
+                Page.reattach(held["target_id"], port=cfg.port).close()
+            except Exception:
+                pass
+            record.unlink(missing_ok=True)
+        else:
+            page.grant_clipboard()
+            page.bring_to_front()
+    if page is None:
+        page = open_doc(doc_id, tab_id, port=cfg.port)
+    try:
+        yield page
+    finally:
+        if cfg.keep_tab and getattr(page, "target_id", None):
+            LOCK_DIR.mkdir(parents=True, exist_ok=True)
+            record.write_text(json.dumps(
+                {"target_id": page.target_id, "tab_id": tab_id, "at": time.time()}
+            ))
+            page.detach()
+        else:
+            record.unlink(missing_ok=True)
+            page.close()
+
+
 def _reader(doc_id: str, token: str | None, cfg: Config):
     return (
         post_mod.browser_reader(cfg.port, doc_id)
@@ -247,25 +303,21 @@ def _post(
         headed = [(q, e.result()) for (q, _), e in zip(pairs, edits)]
     finally:
         pool.shutdown(wait=True)
-    with browser_lock(doc_id):
-        page = open_doc(doc_id, tab["id"], port=cfg.port)
-        try:
-            run = post_many(
-                page, doc_id, tab, headed, token, cfg.strategy,
-                read_comments=_reader(doc_id, token, cfg),
-                # The submitter already built this, under the same rule, for the same
-                # document and tab. Building a second one here gave the run two
-                # revision baselines and wrote the "when is there a revision guard"
-                # rule in two places ten lines apart.
-                fresh_tab=sub.fresh_tab,
-            ) if pairs else Run(doc_id=doc_id, tab_id=tab["id"], strategy=cfg.strategy)
-            # After every comment, same rule as the pipeline: suggestions type last.
-            if sub.suggestions:
-                s_run = sub.place_suggestions(page, tab, doc_id)
-                run.results.extend(s_run.results)
-                run.notes.extend(s_run.notes)
-        finally:
-            page.close()
+    with browser_lock(doc_id), editor(doc_id, tab["id"], cfg) as page:
+        run = post_many(
+            page, doc_id, tab, headed, token, cfg.strategy,
+            read_comments=_reader(doc_id, token, cfg),
+            # The submitter already built this, under the same rule, for the same
+            # document and tab. Building a second one here gave the run two
+            # revision baselines and wrote the "when is there a revision guard"
+            # rule in two places ten lines apart.
+            fresh_tab=sub.fresh_tab,
+        ) if pairs else Run(doc_id=doc_id, tab_id=tab["id"], strategy=cfg.strategy)
+        # After every comment, same rule as the pipeline: suggestions type last.
+        if sub.suggestions:
+            s_run = sub.place_suggestions(page, tab, doc_id)
+            run.results.extend(s_run.results)
+            run.notes.extend(s_run.notes)
     for r in run.posted:
         sub.record(doc_id, r)
     return run
@@ -442,19 +494,16 @@ def _pipeline(
     run_stages = _sync if cfg.schedule == "sync" else _async
 
     # No lock on a dry run: it never opens the editor.
-    with browser_lock(doc_id) if not dry_run else nullcontext():
-        page = None if dry_run else open_doc(doc_id, tab["id"], port=cfg.port)
-        try:
-            run_stages(tab, stream, page, results, pairs, sub)
-            # Suggestions type only after the last comment has posted: comments
-            # never navigate a document containing our own edits.
-            if page is not None and sub.suggestions:
-                s_run = sub.place_suggestions(page, tab, doc_id)
-                results.extend(s_run.results)
-                notes.extend(s_run.notes)
-        finally:
-            if page is not None:
-                page.close()
+    with browser_lock(doc_id) if not dry_run else nullcontext(), (
+        editor(doc_id, tab["id"], cfg) if not dry_run else nullcontext()
+    ) as page:
+        run_stages(tab, stream, page, results, pairs, sub)
+        # Suggestions type only after the last comment has posted: comments
+        # never navigate a document containing our own edits.
+        if page is not None and sub.suggestions:
+            s_run = sub.place_suggestions(page, tab, doc_id)
+            results.extend(s_run.results)
+            notes.extend(s_run.notes)
 
     if dry_run and sub.suggestions:
         notes.append(

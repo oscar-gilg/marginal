@@ -52,7 +52,9 @@ def test_every_reachable_config_parses_as_the_settings_it_claims(tmp_path, keys,
     settings = setup.preset(keys=keys, accounts=accounts)
     path = tmp_path / "marginal.toml"
     setup.write_config(path, settings, force=False)
-    assert tomllib.loads(path.read_text()) == settings
+    loaded = tomllib.loads(path.read_text())
+    assert {k: loaded[k] for k in settings} == settings
+    assert loaded["mode"] == "agent", "the rest of the template is there too"
 
 
 def test_the_written_config_is_accepted_by_the_config_loader(tmp_path, monkeypatch):
@@ -227,13 +229,14 @@ def test_setup_launches_headful_even_when_the_config_says_headless(monkeypatch):
     assert seen == {"headless": False}
 
 
-def test_a_config_that_needs_nothing_says_so_rather_than_being_empty(tmp_path):
-    # An empty file is indistinguishable from a command that failed silently.
+def test_a_config_that_needs_nothing_is_still_the_whole_template(tmp_path):
+    # An empty file is indistinguishable from a command that failed silently; the
+    # written config lists every setting whether or not any differs from default.
     path = tmp_path / "marginal.toml"
     setup.write_config(path, {}, force=False)
     text = path.read_text()
-    assert "already the fast path" in text
-    assert not [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+    assert text.startswith("# Written by `marginal setup`")
+    assert '\nmode = "agent"' in text and "\ncritic = " in text
 
 
 def test_every_written_setting_carries_its_reason():
@@ -242,7 +245,7 @@ def test_every_written_setting_carries_its_reason():
     rendered = setup.render(setup.preset(keys=[], accounts=[]))
     for name in ("source",):
         assert name in setup._WHY
-    assert rendered.count("#") >= 3 + 1  # header lines plus one reason per setting
+    assert 'source = "browser"   # ' in rendered, rendered
 
 
 def test_the_config_path_the_command_writes_is_the_one_it_reports(tmp_path, monkeypatch, capsys):
@@ -495,3 +498,30 @@ def test_printed_commands_are_runnable_as_printed(monkeypatch):
     monkeypatch.setattr(setup.shutil, "which", lambda _n: "/usr/local/bin/marginal")
     on_path = setup._next_step(None, keys=["K"], accounts=[])
     assert "uvx marginal" not in on_path, "should not prefix uvx when it is installed"
+
+
+def test_the_written_config_is_the_whole_template_filled_in():
+    # One file lists every setting: the template, with this machine's values
+    # rewritten in place — including a setting the template keeps commented out.
+    rendered = setup.render({"source": "browser", "account": "bot@example.com", "headless": True})
+    assert 'source = "browser"' in rendered and 'source = "api"' not in rendered
+    assert '\naccount = "bot@example.com"' in rendered and "# account =" not in rendered
+    assert "\nheadless = true" in rendered
+    for name in ("mode", "critic", "keep_tab", "tab_ttl", "commenter"):
+        assert f"\n{name} = " in rendered, name
+    assert rendered.startswith("# Written by `marginal setup`")
+
+
+def test_a_setting_the_template_lacks_is_appended(tmp_path, monkeypatch):
+    rendered = setup.render({"port": 9333, "credentials": "/x/creds.json"})
+    assert "\nport = 9333" in rendered
+    assert '\ncredentials = "/x/creds.json"' in rendered and "written by setup" in rendered
+
+
+def test_the_rendered_config_loads(tmp_path, monkeypatch):
+    from marginal import config as config_mod
+
+    (tmp_path / "marginal.toml").write_text(setup.render({"source": "browser", "headless": True}))
+    monkeypatch.chdir(tmp_path)
+    cfg = config_mod.load()
+    assert (cfg.source, cfg.headless, cfg.keep_tab, cfg.tab_ttl) == ("browser", True, True, 900)

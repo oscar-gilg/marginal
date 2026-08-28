@@ -30,6 +30,10 @@ docs.google.com rather than a sign-in page, and it says which one it made.
 
 from __future__ import annotations
 
+import re
+
+import json
+
 import os
 import shutil
 from dataclasses import dataclass
@@ -304,30 +308,54 @@ _WHY = {
     "own session. `marginal auth ...` and this can go back to \"api\".",
     "critic": "who runs the shortening pass: api (this tool, needs a key), agent "
     "(the placing subagent), off.",
+    "profile": "absolute, so the signed-in browser session is found from any "
+    "directory; a relative path would create a second, signed-out profile elsewhere.",
+    "headless": "runs stay off the desktop; the profile was signed in headful once.",
+    "mode": "who writes the comments.",
+    "account": "whose Google account posts and reads the comments.",
 }
 
 
+def _toml_value(value: object) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, int):
+        return str(value)
+    return json.dumps(str(value))  # a TOML basic string is a JSON string
+
+
+def template() -> str:
+    """The full example config, shipped inside the package."""
+    return (Path(__file__).parent / "example.toml").read_text()
+
+
 def render(settings: dict[str, object]) -> str:
-    """The config file, as text."""
-    lines = [
-        "# Written by `marginal setup`. Every setting here differs from the",
-        "# default; see marginal.example.toml for the full list and what each",
-        "# one means. `marginal config` prints what a run here would use.",
-    ]
-    if not settings:
-        lines += [
-            "",
-            "# Nothing to override: this machine has both a model API key and a",
-            "# Google account, so the defaults are already the fast path.",
-        ]
-        return "\n".join(lines) + "\n"
+    """The config file, as text: the whole template, with `settings` filled in.
+
+    The whole file rather than only what differs, so the one config a person
+    opens is also the one that lists every setting and says what each means. A
+    setting the template names has its line rewritten in place (a commented-out
+    `# account = ...` counts); one it does not is appended at the end.
+    """
+    text = template()
+    head = (
+        "# Written by `marginal setup`; every setting is here with its default or\n"
+        "# this machine's value. `marginal config` prints what a run would use and\n"
+        "# where each value came from. A ./marginal.toml or a CLI flag overrides.\n"
+    )
+    # Drop the template's own "copy me" header — this *is* the copy.
+    text = head + text.split("\n\n", 1)[1]
+    missing = []
     for name, value in settings.items():
-        rendered = str(value).lower() if isinstance(value, bool) else f'"{value}"'
-        # Wrapped, because these reasons are the point of the file and an unwrapped
-        # one runs off the side of the editor it is read in.
-        lines += [""] + [f"# {ln.strip()}" for ln in _wrap(_WHY[name], 0, width=74)]
-        lines.append(f"{name} = {rendered}")
-    return "\n".join(lines) + "\n"
+        why = " ".join(ln.strip() for ln in _wrap(_WHY.get(name, ""), 0, width=200))
+        line = f"{name} = {_toml_value(value)}" + (f"   # {why}" if why else "")
+        pattern = re.compile(rf"^#?\s*{re.escape(name)}\s*=.*$", re.MULTILINE)
+        text, n = pattern.subn(line, text, count=1)
+        if n == 0:
+            missing.append(line)
+    if missing:
+        text = text.rstrip("\n") + "\n\n# --- written by setup ---\n" + "\n".join(missing) + "\n"
+    return text
 
 
 def write_config(path: Path, settings: dict[str, object], force: bool) -> Check:

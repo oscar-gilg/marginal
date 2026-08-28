@@ -99,6 +99,20 @@ calls `critic_model` — the mixed setting, where the agent writes and you pay f
 the trim), or `off`. A key buys `critic = "api"` and `mode = "api"`, where this
 tool writes the comments itself.
 
+## Configuration
+
+One file: `~/.config/marginal/config.toml`. `marginal setup` writes it with every
+setting listed, each with its default or this machine's value and a comment saying
+what it means — the same text as
+[`marginal.example.toml`](marginal.example.toml). Edit it in place. A
+`./marginal.toml` in the working directory, then `--config <path>`, then a CLI
+flag override it, in that order; `marginal config` prints what a run would use and
+where each value came from.
+
+Agent mode makes no model call unless the config says so — `critic = "api"` (this
+tool trims comments on a paid model) or `reconcile_anchors = true` are the two
+opt-ins — and refuses one loudly otherwise, naming the setting.
+
 ## Usage
 
 ```bash

@@ -540,3 +540,87 @@ def test_the_commenter_is_told_who_trims(monkeypatch):
     assert "on claude-opus-5 at medium effort" in agent, "the trim model is named either way"
     assert "on claude-opus-5" in api
 
+
+
+# ---- the held editor tab -------------------------------------------------------
+
+
+class _HeldPage:
+    def __init__(self, target_id="T1", editor=True):
+        self.target_id, self.editor, self.closed, self.detached = target_id, editor, False, False
+
+    def wait_until(self, js, timeout=5):
+        return self.editor
+
+    def grant_clipboard(self):
+        pass
+
+    def bring_to_front(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def detach(self):
+        self.detached = True
+
+
+def _held(monkeypatch, tmp_path, record=None, live=None, opened=None):
+    from marginal import run as runmod
+
+    monkeypatch.setattr(runmod, "LOCK_DIR", tmp_path)
+    if record is not None:
+        (tmp_path / "d.tab").write_text(json.dumps(record))
+    live = live or {}
+
+    def reattach(target_id, port=9222):
+        if target_id in live:
+            return live[target_id]
+        raise LookupError(target_id)
+
+    monkeypatch.setattr(runmod.Page, "reattach", staticmethod(reattach))
+    opened = opened if opened is not None else []
+    monkeypatch.setattr(runmod, "open_doc", lambda doc_id, tab_id, port=9222: opened.append(tab_id) or _HeldPage("NEW"))
+    return runmod, opened
+
+
+def test_a_recent_tab_on_the_same_document_tab_is_reused(monkeypatch, tmp_path):
+    import time as _t
+    held = _HeldPage("T1")
+    runmod, opened = _held(monkeypatch, tmp_path, {"target_id": "T1", "tab_id": "t.0", "at": _t.time()}, {"T1": held})
+    with runmod.editor("d", "t.0", _cfg()) as page:
+        assert page is held
+    assert opened == [], "no fresh tab when a live one was recorded"
+    assert held.detached and not held.closed, "left open for the next process"
+    assert json.loads((tmp_path / "d.tab").read_text())["target_id"] == "T1"
+
+
+def test_a_stale_or_foreign_tab_is_closed_and_replaced(monkeypatch, tmp_path):
+    import time as _t
+    for record in (
+        {"target_id": "T1", "tab_id": "t.0", "at": _t.time() - 10_000},  # too old
+        {"target_id": "T1", "tab_id": "t.OTHER", "at": _t.time()},        # other doc tab
+    ):
+        old = _HeldPage("T1")
+        runmod, opened = _held(monkeypatch, tmp_path, record, {"T1": old})
+        with runmod.editor("d", "t.0", _cfg()) as page:
+            assert page.target_id == "NEW"
+        assert old.closed, "the tab that was not reused is not leaked"
+        assert opened == ["t.0"]
+        assert json.loads((tmp_path / "d.tab").read_text())["target_id"] == "NEW"
+
+
+def test_a_tab_whose_editor_does_not_answer_is_replaced(monkeypatch, tmp_path):
+    import time as _t
+    dead = _HeldPage("T1", editor=False)
+    runmod, opened = _held(monkeypatch, tmp_path, {"target_id": "T1", "tab_id": "t.0", "at": _t.time()}, {"T1": dead})
+    with runmod.editor("d", "t.0", _cfg()) as page:
+        assert page.target_id == "NEW"
+    assert dead.closed and opened == ["t.0"]
+
+
+def test_keep_tab_off_closes_the_tab_and_records_nothing(monkeypatch, tmp_path):
+    runmod, opened = _held(monkeypatch, tmp_path)
+    with runmod.editor("d", "t.0", _cfg(keep_tab=False)) as page:
+        pass
+    assert page.closed and not (tmp_path / "d.tab").exists()

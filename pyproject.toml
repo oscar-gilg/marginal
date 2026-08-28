@@ -41,6 +41,7 @@ packages = ["src/marginal"]
 # prompts at all and every review fails on FileNotFoundError.
 [tool.hatch.build.targets.wheel.force-include]
 "prompts" = "marginal/prompts"
+"marginal.example.toml" = "marginal/example.toml"
 
 [dependency-groups]
 dev = [

@@ -36,6 +36,7 @@ from dataclasses import fields
 from pathlib import Path
 
 from . import auth, config as config_mod
+from . import model
 from . import gdocs, ledger, reactions
 from . import setup as setup_mod
 from .cdp import launch_chrome, wait_for_port
@@ -431,7 +432,15 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _main(argv: list[str] | None = None) -> int:
-    a = _parser().parse_args(argv)
+    try:
+        return _dispatch(_parser().parse_args(argv))
+    finally:
+        # The no-model-calls guard belongs to the invocation that set it, and one
+        # process can run several commands (the test suite does).
+        model.forbid(None)
+
+
+def _dispatch(a) -> int:
     # Built once and used twice: `load` resolves the value, `provenance` records
     # which file or flag set it. Two call sites reading one dict, so the printed
     # explanation cannot describe a layering the run did not use.
@@ -540,6 +549,17 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"# {doc['title']} — tab {tab['id']} ({len(tab['text'])} chars)\n")
         print(tab["text"])
         return 0
+
+    if a.cmd in ("context", "submit-brief", "post-batch"):
+        # Agent mode's guarantee, checked rather than assumed: these commands call
+        # no model unless a setting says so. `critic = "api"` and
+        # `reconcile_anchors = true` are the two opt-ins.
+        if cfg.critic_stage() != "api" and not cfg.reconcile_anchors:
+            model.forbid(
+                "agent mode makes no model calls; set critic = \"api\" (or pass "
+                "--critic api) to have this tool trim comments, or "
+                "reconcile_anchors = true to let it place a quote no rule could"
+            )
 
     if a.cmd == "context":
         print(context(doc_id, token, cfg, a.tab, a.focus))

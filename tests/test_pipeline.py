@@ -198,6 +198,7 @@ def test_a_critic_outage_keeps_the_comment(monkeypatch):
     body, note = critic.tighten("The original point.", "passage", _cfg())
     assert body == "The original point.", "losing a comment to an editing failure is absurd"
     assert "critic failed" in note
+    assert "529" in note, "the note must carry the error text, not just its class"
 
 
 def test_the_pipeline_posts_every_comment_in_order(monkeypatch):

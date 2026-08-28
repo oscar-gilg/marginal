@@ -98,7 +98,10 @@ def tighten(
         )
         out = model.extract_json_object(raw)
     except Exception as e:
-        return body, f"critic failed ({type(e).__name__}), kept original"
+        # Keep the message, not just the class: "ModelError" alone cannot tell a
+        # rate limit from a missing key from a model id that does not exist.
+        detail = str(e).strip().replace("\n", " ")[:160]
+        return body, f"critic failed ({type(e).__name__}: {detail}), kept original"
     edited = (out.get("body") or "").strip()
     if not edited:
         return body, "critic returned nothing, kept original"

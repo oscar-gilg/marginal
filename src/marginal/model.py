@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -177,10 +178,35 @@ def load_env(path: Path | None = None) -> None:
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
+# Waits before each retry of a busy provider. Two retries: a 429 or 5xx is the
+# provider being busy for seconds, not minutes, and a third wait would mostly
+# delay the fallback route that `auto` has ready.
+_RETRY_WAITS = (2.0, 5.0)
+
+
 def _post(url: str, body: dict, headers: dict, timeout: int = 600) -> dict:
     req = urllib.request.Request(
         url, data=json.dumps(body).encode(), headers={**headers, "content-type": "application/json"}
     )
+    for wait in (*_RETRY_WAITS, None):
+        try:
+            return _post_once(req, url, timeout)
+        except ModelError as e:
+            # A rate limit or a 5xx is transient; it used to fail the call outright,
+            # and with five posts running at once that was enough to lose the
+            # critic on two of them. Anything else is not improved by waiting.
+            if wait is None or not _is_busy(e):
+                raise
+            time.sleep(wait)
+    raise AssertionError("unreachable")
+
+
+def _is_busy(error: ModelError) -> bool:
+    text = f" {error} "
+    return " 429 " in text or any(f" 5{d} " in text for d in ("00", "02", "03", "04", "29"))
+
+
+def _post_once(req: urllib.request.Request, url: str, timeout: int) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)

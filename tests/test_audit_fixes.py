@@ -461,3 +461,53 @@ def test_usage_and_json_stay_serialisable():
     # `dead_providers` is keyed by a tuple now; anything that reports it must not
     # assume a JSON-encodable mapping without converting.
     assert json.dumps({f"{p}:{m}": v for (p, m), v in model.dead_providers().items()}) is not None
+
+
+def test_post_retries_a_busy_provider_then_succeeds(monkeypatch):
+    # Five posts at once put two critic calls into a 429/5xx, and `_post` used to
+    # fail on the first one. A busy provider is retried; nothing else is.
+    import io
+
+    calls = []
+    waits = []
+
+    def urlopen(req, timeout=600):
+        calls.append(req)
+        if len(calls) < 3:
+            raise urllib.error.HTTPError(
+                "https://x", 529, "overloaded", {}, io.BytesIO(b'{"type":"overloaded_error"}')
+            )
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(model.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(model.time, "sleep", waits.append)
+    assert model._post("https://x", {}, {}) == {"ok": True}
+    assert len(calls) == 3 and waits == list(model._RETRY_WAITS)
+
+
+def test_post_does_not_retry_a_permanent_error(monkeypatch):
+    import io
+
+    calls = []
+
+    def urlopen(req, timeout=600):
+        calls.append(req)
+        raise urllib.error.HTTPError("https://x", 401, "unauthorized", {}, io.BytesIO(b"nope"))
+
+    monkeypatch.setattr(model.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(model.time, "sleep", lambda s: (_ for _ in ()).throw(AssertionError("slept")))
+    with pytest.raises(model.ModelError):
+        model._post("https://x", {}, {})
+    assert len(calls) == 1
+
+
+def test_post_gives_up_after_the_retry_budget(monkeypatch):
+    import io
+
+    def urlopen(req, timeout=600):
+        raise urllib.error.HTTPError("https://x", 429, "rate limited", {}, io.BytesIO(b"slow down"))
+
+    monkeypatch.setattr(model.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(model.time, "sleep", lambda s: None)
+    with pytest.raises(model.ModelError, match="429"):
+        model._post("https://x", {}, {})

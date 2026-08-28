@@ -304,6 +304,12 @@ def post_comment(page: Page, body: str, timeout: float = 5.0, settle: float = 0.
     page.insert_text(body)
     page.key("Enter", META)
     time.sleep(settle)
+    # Docs hands focus back to the document with the anchor still selected, and
+    # this profile is signed in as the author, so that selection shows up in their
+    # own window as a lingering highlight. Collapse it to a caret before the tab
+    # goes away. Harmless if focus stayed in the sidebar: ArrowRight does nothing
+    # there.
+    page.key("ArrowRight")
 
 
 def open_doc(doc_id: str, tab_id: str | None = None, port: int = 9222) -> Page:

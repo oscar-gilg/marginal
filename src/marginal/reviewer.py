@@ -395,6 +395,19 @@ def vet(items: list, submitter) -> tuple[list[tuple[str, str]], list[str]]:
                 rejected.append(verdict.reason)
             continue
         comment = (item.get("comment") or item.get("body") or "").strip()
+        # With the editing pass delegated to the submitting subagent, the ceiling is
+        # the one thing this side can still check. It used to be a prompt's word
+        # against a caller's shortcut; a body over the ceiling now fails here, loudly,
+        # instead of posting raw with no symptom but its length.
+        cfg = submitter.cfg
+        words = len(comment.split())
+        if cfg.critic_stage() == "agent" and words > cfg.word_ceiling:
+            rejected.append(
+                f"{words} words on {(item.get('quote') or '')[:40]!r} is over the "
+                f"{cfg.word_ceiling}-word ceiling: run the editing pass in the "
+                "submit brief on this comment, then post the tightened body"
+            )
+            continue
         verdict = submitter.accept(item.get("quote") or "", comment)
         if verdict.ok:
             pairs.append((verdict.quote, comment[:2000]))

@@ -103,9 +103,19 @@ class Config:
     # Deprecated migration path. This must be named explicitly: Marginal no
     # longer discovers or depends on workspace-MCP's private token store.
     credentials: Path | None = None
-    # The editing pass. A second model tightens each comment while the first is
-    # still writing the next one, so its latency is hidden rather than paid.
-    critic: bool = True
+    # The editing pass: who tightens each comment before it posts.
+    #
+    #   api    this tool calls `critic_model` itself, while the commenter is still
+    #          writing the next comment, so the latency is hidden rather than paid
+    #   agent  the placing subagent runs the same critique prompt itself, on its
+    #          own subscription, so agent mode makes no model call at all; the
+    #          word ceiling is then enforced by `post-batch` rather than by trust
+    #   off    comments post as written
+    #   auto   "agent" under mode = "agent", "api" under mode = "api"
+    #
+    # `true` and `false` still mean "api" and "off". Agent mode with critic = "api"
+    # is the mixed setting: the coding agent writes, this tool pays for the trim.
+    critic: str | bool = "auto"
     # Show the commenter the document's figures. Off means it is told a figure is
     # there and that it cannot see it, which is the honest fallback but a weak one:
     # a figure usually carries the result the surrounding prose is claiming.
@@ -185,6 +195,22 @@ class Config:
 
     def commenter_system(self) -> str:
         return _read_prompt(self.commenter_prompt)
+
+    def critic_stage(self) -> str:
+        """`critic` resolved to one of "api", "agent", "off".
+
+        Resolved on read rather than at load because a `Config(...)` built directly
+        never passes through `_validate`, and a bool there used to be tested for
+        truth — which would have made the string "off" mean on.
+        """
+        value = self.critic
+        if value is True:
+            return "api"
+        if value is False:
+            return "off"
+        if value == "auto":
+            return "agent" if self.mode == "agent" else "api"
+        return value
 
     def respond_system(self) -> str:
         return _read_prompt(self.respond_prompt)
@@ -266,6 +292,8 @@ def _load_file(path: Path) -> dict:
 # Settings whose value must be one of a fixed set. Checked at load rather than at
 # use: a typo in `schedule` used to select async silently, and one in `source` chose
 # the credentialed path — both of which look like the tool ignoring the config.
+_CRITIC_STAGES = ("auto", "api", "agent", "off")
+
 _CHOICES = {
     "mode": ("api", "agent"),
     "provider": ("auto", "anthropic", "openrouter"),
@@ -295,6 +323,10 @@ def _validate(cfg: Config) -> Config:
                     f'from source = "api", which is where the text is read from.'
                 )
             raise ValueError(f"{name} must be one of {allowed}, got {value!r}")
+    if cfg.critic not in (True, False, *_CRITIC_STAGES):
+        raise ValueError(
+            f"critic must be one of {_CRITIC_STAGES} or a boolean, got {cfg.critic!r}"
+        )
     # Same set as `critic_effort`, plus None for "leave the provider default alone".
     if cfg.effort is not None and cfg.effort not in _CHOICES["critic_effort"]:
         raise ValueError(

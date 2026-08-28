@@ -26,15 +26,17 @@ schedule = "async"         # async: write the next comment while this one posts
                            # sync: one comment start to finish, then the next
 
 # --- the editing pass ---
-# A second model shortens each comment. It may only cut, so lowering the band is
-# what shortens comments; raising it only stops them being cut.
-critic = true
+# Who shortens each comment: "agent" (the placing subagent, no model call — the
+# default under mode = "agent"), "api" (this tool calls critic_model; the mixed
+# setting under agent mode), or "off". The pass may only cut, so lowering the band
+# is what shortens comments; raising it only stops them being cut.
+critic = "auto"
 critic_model = "claude-opus-5"
 critic_effort = "medium"
 critic_workers = 4         # concurrent edits in flight
 min_words = 20
 max_words = 60
-word_ceiling = 80          # reported when exceeded, never enforced
+word_ceiling = 80          # enforced by post-batch under critic = "agent"; else reported
 
 # --- looking things up ---
 # Let the commenter search the web while it reads. Off by default: a comment is

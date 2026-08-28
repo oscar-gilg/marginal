@@ -65,8 +65,8 @@ inside it.
 
 | You have | What runs | What it costs you |
 | --- | --- | --- |
-| Nothing but Chrome | `source = "browser"`, `critic = false` — agent mode, comments written by your coding agent | Comments post at the length the agent wrote them, and half the commands are unavailable — see below |
-| A model API key | the shortening pass runs, and `mode = "api"` (this tool writes the comments itself) becomes available | — |
+| Nothing but Chrome | `source = "browser"` — agent mode, comments written and tightened by your coding agent | Half the commands are unavailable — see below |
+| A model API key | `mode = "api"` (this tool writes the comments itself) and `critic = "api"` (this tool pays for the trim) become available | — |
 | Google OAuth too | `source = "api"` — a faster read, a revision check before each post, and every command | an OAuth client: one you were given, or ten minutes making your own |
 
 **What the first row cannot do.** `comment`, `review`, `context`, `submit-brief`
@@ -85,15 +85,19 @@ Google OAuth client — see below.
 file next to it. `marginal config` prints what a run here would use and where
 each value came from.
 
-**Agent mode is the default.** A coding agent already reading the document writes
-the comments and Marginal places them, so nothing here calls a model and no key is
-needed — it runs on whatever subscription the agent has. A key buys two things:
-the shortening pass, and the option of `mode = "api"`, where this tool calls a
-model itself. The shortening pass runs inside
-`post-batch` on this tool's side, deliberately: it used to live in a *prompt*, and
-any caller that reached `post-batch` without reading that prompt posted unedited
-comments. With no key there is nothing to run it with, so `setup` turns it off
-rather than failing on every comment.
+**Agent mode is the default, and it calls no model.** A coding agent already
+reading the document writes the comments, the subagent that places each one runs
+the shortening pass from the same critique prompt API mode uses, and Marginal
+places them — all on whatever subscription the agent has. The one thing this side
+still checks is the word ceiling: `post-batch` refuses a body over it, so a
+subagent that skipped the editing rules fails loudly instead of posting long. (The
+pass used to run inside `post-batch` on a paid model precisely so it could not be
+skipped; the ceiling check is what replaces that guarantee.)
+
+`critic` picks who trims: `agent` (the default under agent mode), `api` (this tool
+calls `critic_model` — the mixed setting, where the agent writes and you pay for
+the trim), or `off`. A key buys `critic = "api"` and `mode = "api"`, where this
+tool writes the comments itself.
 
 ## Usage
 

@@ -90,10 +90,17 @@ def _commenting(p, doc: bool = True) -> None:
         help="comments only, overriding a config that enables suggestions",
     )
     p.add_argument(
+        "--critic",
+        choices=("api", "agent", "off"),
+        default=None,
+        help="who runs the editing pass: this tool (api), the placing subagent "
+        "(agent), or nobody (off). Default: agent under mode=agent, api otherwise",
+    )
+    p.add_argument(
         "--no-critic",
         dest="critic",
-        action="store_false",
-        default=None,
+        action="store_const",
+        const="off",
         help="skip the editing pass; post the commenter's own wording",
     )
     p.add_argument("--critic-model", help="model for the editing pass (default: claude-opus-5)")

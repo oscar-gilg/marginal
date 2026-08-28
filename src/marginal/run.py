@@ -41,6 +41,8 @@ submitter subagent in the other — but they carry the same sentence, produced b
 
 from __future__ import annotations
 
+import dataclasses
+
 import fcntl
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -230,8 +232,11 @@ def _post(
     `sub.critique` tightens and stamps, and is a no-op tighten when `critic` is off,
     so the pipeline path (which critiques in `_edit`) never reaches this.
     """
-    if not sub.cfg.critic:
+    stage = sub.cfg.critic_stage()
+    if stage == "off":
         sub.note("critic off: comments posted as written")
+    elif stage == "agent":
+        sub.note("critic = agent: edited by the submitting agent, ceiling checked here")
 
     # No wrapper around `sub.critique`: it keeps the comment on an editing failure
     # itself now, so every schedule gets that answer rather than each caller
@@ -409,6 +414,12 @@ def _pipeline(
     the difference to the scheduler is the point — otherwise a comment would depend
     on which schedule produced it.
     """
+    if cfg.critic_stage() == "agent":
+        # There is no placing subagent on this path to run the editing pass, so
+        # "agent" can only mean "this tool": `review` under an agent-mode config
+        # (the explicit command beats the setting) must still edit, not silently
+        # post the commenter's first draft.
+        cfg = dataclasses.replace(cfg, critic="api")
     results: list[Result] = []
     pairs: list[tuple[str, str]] = []
     notes: list[str] = []
@@ -532,7 +543,7 @@ def post_batch(
         # never reaches, so what is printed is the wording before it is tightened.
         # Said out loud because the alternative — a preview that quietly differs
         # from what posts — is the kind of silent gap that stage was moved to close.
-        if pairs and cfg.critic:
+        if pairs and cfg.critic_stage() == "api":
             rejected.append("dry run: bodies shown before the editing pass")
         return None, pairs, rejected
     run = _post(doc_id, token, cfg, tab, pairs, sub)
@@ -587,11 +598,42 @@ def submit_brief(doc_id: str, token: str, cfg: Config, tab_id: str | None = None
     # lets `post-batch` apply the same rule as everything else: fine on a one-tab
     # document, and a refusal listing the tabs on any other.
     tab_flag = f" --tab {tab_id}" if tab_id else ""
+    if cfg.critic_stage() == "agent":
+        return f"""
+You are placing one finished comment on a Google Doc. The comment has already been
+written by a colleague reviewing the document. Do not second-guess whether it is
+worth making — that judgement is not yours. Your job is two clerical steps: tighten
+the wording under the rules below, then make it land on the right words.
+
+# 1. Edit it
+
+Apply the following editing rules to the comment yourself, exactly as a separate
+editor would. They are the same rules the API-mode editing pass uses, so do not
+improvise beyond them. The "passage" they refer to is the quote you were given.
+
+<editing-rules>
+{cfg.critique_system()}
+</editing-rules>
+
+Take the "body" your edit produces as the comment to post. If the rules say to
+leave it unchanged, post it unchanged. `post-batch` refuses a body over
+{cfg.word_ceiling} words, so a skipped edit fails here rather than posting long.
+
+# 2. Submit it
+
+Post the tightened comment with its quote:
+
+    echo '[{{"quote": "...", "comment": "..."}}]' | \
+        marginal post-batch {doc_id}{tab_flag} --from - --as <model>
+
+# 3. Fix anything it rejects
+{_REJECTION_BRIEF}
+{_SUGGEST_BRIEF if cfg.suggestions else ""}""".strip()
     return f"""
 You are placing one finished comment on a Google Doc. The comment has already been
 written by a colleague reviewing the document. Do not second-guess whether it is
 worth making — that judgement is not yours, and do not reword or shorten it either:
-an editing pass runs on the way in. Your job is to make it land on the right words.
+{"an editing pass runs on the way in" if cfg.critic_stage() == "api" else "it posts as written"}. Your job is to make it land on the right words.
 
 # 1. Submit it
 
@@ -601,7 +643,11 @@ Post the comment with its quote, exactly as it was given to you:
         marginal post-batch {doc_id}{tab_flag} --from - --as <model>
 
 # 2. Fix anything it rejects
+{_REJECTION_BRIEF}
+{_SUGGEST_BRIEF if cfg.suggestions else ""}""".strip()
 
+
+_REJECTION_BRIEF = """
 A rejected quote comes back with the reason and, where there is one, the nearest
 passage in the document. Correct the quote and post again. The document's own text
 is what a quote must match: it contains no Markdown syntax, no table pipes and no
@@ -611,7 +657,7 @@ author's own sentence closest to the point the comment makes.
 Two attempts is usually enough. If a comment genuinely cannot be placed, say so and
 stop rather than anchoring it somewhere it does not belong — a comment on the wrong
 sentence is worse than no comment.
-{_SUGGEST_BRIEF if cfg.suggestions else ""}""".strip()
+""".strip()
 
 
 def context(
@@ -644,9 +690,8 @@ this instruction:
 
     Run `marginal submit-brief {doc_id} --tab {tab['id']}` and follow it.
 
-The subagent places the comment; it does not rewrite it. The editing pass for length
-and redundancy runs inside the posting command, on {cfg.critic_model}, so write the
-comment you mean and let it trim.
+The subagent places the comment; it does not decide whether it is worth making.
+{_EDITING_NOTE[cfg.critic_stage()].format(critic_model=cfg.critic_model)}
 """.strip()
     if cfg.suggestions:
         handoff += """
@@ -662,6 +707,25 @@ the end, so submit them as you go and expect no immediate change in the document
         suggestions=reviewer.SUGGESTION_CONTRACT,
     )
     return brief.as_text(parts, FIGURE_CACHE / f"{doc_id}-{tab['id'] or 'only'}")
+
+
+# What the commenter is told about the editing pass, by who runs it. One sentence
+# each, so the commenter writes freely in every case and the difference is only
+# who trims.
+_EDITING_NOTE = {
+    "api": (
+        "The editing pass for length and redundancy runs inside the posting command, "
+        "on {critic_model}, so write the comment you mean and let it trim."
+    ),
+    "agent": (
+        "The editing pass for length and redundancy is run by that subagent, from "
+        "rules in its brief, so write the comment you mean and let it trim."
+    ),
+    "off": (
+        "There is no editing pass: the comment posts as you wrote it, so keep it to "
+        "the point."
+    ),
+}
 
 
 def _tab_of(doc: dict, quoted: str) -> dict | None:

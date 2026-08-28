@@ -19,7 +19,7 @@ def test_no_credentials_at_all_still_produces_a_working_config():
     # The zero-friction path, and the reason this command exists: nothing
     # configured must still yield settings that run.
     settings = setup.preset(keys=[], accounts=[])
-    assert settings == {"source": "browser", "critic": False}
+    assert settings == {"source": "browser"}
 
 
 def test_a_key_and_an_account_override_nothing():
@@ -32,11 +32,10 @@ def test_a_key_without_google_only_changes_where_the_text_is_read():
     assert setup.preset(keys=["OPENROUTER_API_KEY"], accounts=[]) == {"source": "browser"}
 
 
-def test_google_without_a_key_only_turns_the_critic_off():
-    # Agent mode is the default now, so a missing key changes nothing about who
-    # writes — but the shortening pass runs inside `post-batch`, so it would
-    # otherwise fail on every comment at the point it tries to tighten one.
-    assert setup.preset(keys=[], accounts=["me@example.com"]) == {"critic": False}
+def test_google_without_a_key_changes_nothing():
+    # Agent mode is the default, and under it the shortening pass is the placing
+    # subagent's, so nothing a missing key could break is on by default.
+    assert setup.preset(keys=[], accounts=["me@example.com"]) == {}
 
 
 @pytest.mark.parametrize(
@@ -65,7 +64,7 @@ def test_the_written_config_is_accepted_by_the_config_loader(tmp_path, monkeypat
     setup.write_config(path, setup.preset(keys=[], accounts=[]), force=False)
     monkeypatch.chdir(tmp_path)
     cfg = config_mod.load()
-    assert (cfg.source, cfg.mode, cfg.critic) == ("browser", "agent", False)
+    assert (cfg.source, cfg.mode, cfg.critic_stage()) == ("browser", "agent", "agent")
 
 
 def test_an_existing_config_is_never_overwritten_without_force(tmp_path):
@@ -241,9 +240,9 @@ def test_every_written_setting_carries_its_reason():
     # A generated config whose lines have no reason attached gets copied forward
     # long after the reason expired.
     rendered = setup.render(setup.preset(keys=[], accounts=[]))
-    for name in ("source", "critic"):
+    for name in ("source",):
         assert name in setup._WHY
-    assert rendered.count("#") >= 3 + 2  # header lines plus one reason per setting
+    assert rendered.count("#") >= 3 + 1  # header lines plus one reason per setting
 
 
 def test_the_config_path_the_command_writes_is_the_one_it_reports(tmp_path, monkeypatch, capsys):

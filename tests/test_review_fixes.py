@@ -184,9 +184,10 @@ def _batch_scaffold(monkeypatch):
 
 
 def test_agent_mode_posts_are_edited_by_the_code_not_by_a_prompt(monkeypatch):
-    # The defect: agent mode's editing pass lived in the `submit-brief` prompt, so
-    # anything reaching `post-batch` without having read that prompt posted the raw
-    # body — no error, no note, and no symptom but a comment over the word band.
+    # Under critic = "api" the editing pass runs on this side, not in the
+    # `submit-brief` prompt, so a caller reaching `post-batch` without reading the
+    # prompt still gets edited. (Under critic = "agent" the ceiling check plays the
+    # same role — see test_pipeline.)
     from marginal import critic
     from marginal import run as runmod
 
@@ -195,7 +196,7 @@ def test_agent_mode_posts_are_edited_by_the_code_not_by_a_prompt(monkeypatch):
         critic, "tighten", lambda body, quote, cfg, usage=None: ("tightened", "a clause")
     )
     _run, _pairs, notes = runmod.post_batch(
-        "d", "tok", config_mod.Config(header=""),
+        "d", "tok", config_mod.Config(header="", critic="api"),
         [{"quote": QUOTE, "comment": "a long unedited body"}],
         tab_id=None,
     )
@@ -264,7 +265,7 @@ def test_a_dry_run_says_its_preview_is_pre_edit(monkeypatch):
 
     _batch_scaffold(monkeypatch)
     _run, pairs, notes = runmod.post_batch(
-        "d", "tok", config_mod.Config(header=""),
+        "d", "tok", config_mod.Config(header="", critic="api"),
         [{"quote": QUOTE, "comment": "the body"}],
         tab_id=None, dry_run=True,
     )

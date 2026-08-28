@@ -279,7 +279,7 @@ class Submitter:
         is a configuration error that fails on every comment identically, not an
         outage costing one of them, and it should be loud.
         """
-        if self.cfg.critic:
+        if self.cfg.critic_stage() == "api":
             try:
                 body, cut = critic.tighten(body, quote, self.cfg, self.usage)
             except Exception as e:

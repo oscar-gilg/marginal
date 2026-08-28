@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from marginal import config as config_mod
 from marginal import critic, ledger, model, reviewer, run, submission
 from marginal.post import Result
@@ -237,7 +239,7 @@ def test_the_pipeline_posts_every_comment_in_order(monkeypatch):
 
     tab = {"id": "t.0", "text": DOC, "paragraphs": []}
     doc = {"title": "Doc", "tabs": [tab]}
-    cfg = _cfg(header="")
+    cfg = _cfg(header="", critic="api")
     _run, pairs, notes = run._pipeline("d", "tok", cfg, doc, tab, 5, None, False)
 
     assert [b for _, b in posted] == ["FIRST", "SECOND"], "posting must follow document order"
@@ -282,6 +284,9 @@ def _pipeline_run(monkeypatch, schedule, posted):
 def test_sync_and_async_agree_on_what_lands(monkeypatch):
     # The two schedules differ in ordering only. If they ever disagreed on content
     # or order, "which schedule ran" would confound every comparison.
+    #
+    # The config is agent-mode by default, so this also pins that the API-mode
+    # pipeline edits on this side regardless: there is no subagent on this path.
     sync_posted, async_posted = [], []
     _, sync_pairs, _ = _pipeline_run(monkeypatch, "sync", sync_posted)
     _, async_pairs, _ = _pipeline_run(monkeypatch, "async", async_posted)
@@ -385,7 +390,7 @@ def test_agent_mode_does_not_call_a_model_by_default(monkeypatch):
     monkeypatch.setattr(ledger, "record", lambda *a, **k: None)
 
     _run, pairs, notes = runmod.post_batch(
-        "d", "tok", _cfg(header=""),
+        "d", "tok", _cfg(header="", critic="api"),
         [{"quote": "| a table cell | not in the document |", "comment": "x"}],
         tab_id=None, dry_run=True,
     )
@@ -433,3 +438,104 @@ def test_the_api_fallback_can_still_be_switched_on(monkeypatch):
         tab_id=None, dry_run=True,
     )
     assert asked and pairs and pairs[0][0] == "emailed to every resident"
+
+
+# ---- who runs the editing pass -------------------------------------------------
+
+
+def test_critic_auto_follows_the_mode():
+    assert _cfg().critic_stage() == "agent", "agent mode must not reach for a model"
+    assert _cfg(mode="api").critic_stage() == "api"
+    assert _cfg(critic=True).critic_stage() == "api"
+    assert _cfg(critic=False).critic_stage() == "off"
+    assert _cfg(critic="api").critic_stage() == "api", "the mixed setting"
+
+
+def test_a_bad_critic_value_is_refused_at_load(tmp_path, monkeypatch):
+    (tmp_path / "marginal.toml").write_text('critic = "opus"\n')
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="critic"):
+        config_mod.load()
+
+
+def test_agent_mode_posts_without_calling_the_critic_model(monkeypatch):
+    # The whole point of critic = "agent": the placing subagent has already edited,
+    # and this side must not spend a call re-editing.
+    from marginal import ledger
+    from marginal import run as runmod
+
+    monkeypatch.setattr(model, "converse", lambda *a, **k: (_ for _ in ()).throw(AssertionError("model called")))
+    posted = []
+    monkeypatch.setattr(runmod, "_post", lambda doc_id, token, cfg, tab, pairs, sub: posted.extend(pairs))
+    tab = {"id": "t.0", "text": DOC, "paragraphs": []}
+    monkeypatch.setattr(runmod, "read_document", lambda *a, **k: {"title": "D", "tabs": [tab]})
+    monkeypatch.setattr(ledger, "record", lambda *a, **k: None)
+    _run, pairs, notes = runmod.post_batch(
+        "d", "tok", _cfg(header=""),
+        [{"quote": "emailed to every resident", "comment": "Short enough."}],
+    )
+    assert pairs and posted == pairs
+
+
+def test_the_ceiling_is_enforced_when_the_agent_edits(monkeypatch):
+    # The editing pass used to be a prompt the subagent could skip with no symptom
+    # but a long comment. With the pass delegated again, the ceiling is the check.
+    from marginal import ledger
+    from marginal import run as runmod
+
+    tab = {"id": "t.0", "text": DOC, "paragraphs": []}
+    monkeypatch.setattr(runmod, "read_document", lambda *a, **k: {"title": "D", "tabs": [tab]})
+    monkeypatch.setattr(ledger, "record", lambda *a, **k: None)
+    long = " ".join(["word"] * 81)
+    _run, pairs, notes = runmod.post_batch(
+        "d", "tok", _cfg(header="", word_ceiling=80),
+        [{"quote": "emailed to every resident", "comment": long}],
+        dry_run=True,
+    )
+    assert pairs == []
+    assert any("81 words" in n and "ceiling" in n and "editing pass" in n for n in notes), notes
+
+
+def test_the_ceiling_is_not_enforced_when_a_model_edits(monkeypatch):
+    # Under critic = "api" the model trims; a long draft is what it is for.
+    from marginal import ledger
+    from marginal import run as runmod
+
+    tab = {"id": "t.0", "text": DOC, "paragraphs": []}
+    monkeypatch.setattr(runmod, "read_document", lambda *a, **k: {"title": "D", "tabs": [tab]})
+    monkeypatch.setattr(ledger, "record", lambda *a, **k: None)
+    long = " ".join(["word"] * 81)
+    _run, pairs, notes = runmod.post_batch(
+        "d", "tok", _cfg(header="", critic="api", word_ceiling=80),
+        [{"quote": "emailed to every resident", "comment": long}],
+        dry_run=True,
+    )
+    assert len(pairs) == 1
+
+
+def test_the_submit_brief_carries_the_critique_prompt_only_when_the_agent_edits(monkeypatch):
+    from marginal import run as runmod
+
+    agent = runmod.submit_brief("d", "tok", _cfg(), tab_id="t.0")
+    api = runmod.submit_brief("d", "tok", _cfg(critic="api"), tab_id="t.0")
+    off = runmod.submit_brief("d", "tok", _cfg(critic="off"), tab_id="t.0")
+    rules = _cfg().critique_system()
+    assert rules in agent and "# 1. Edit it" in agent
+    assert rules not in api and "editing pass runs on the way in" in api
+    assert rules not in off and "posts as written" in off
+    for text in (agent, api, off):
+        assert "marginal post-batch d --tab t.0" in text
+        assert "Fix anything it rejects" in text
+
+
+def test_the_commenter_is_told_who_trims(monkeypatch):
+    from marginal import run as runmod
+
+    tab = {"id": "t.0", "text": DOC, "paragraphs": []}
+    monkeypatch.setattr(runmod, "read_document", lambda *a, **k: {"title": "D", "tabs": [tab]})
+    monkeypatch.setattr(runmod, "_prior_threads", lambda *a, **k: "")
+    agent = runmod.context("d", "tok", _cfg(), tab_id="t.0")
+    api = runmod.context("d", "tok", _cfg(critic="api"), tab_id="t.0")
+    assert "run by that subagent" in agent and "claude-opus-5" not in agent
+    assert "on claude-opus-5" in api
+

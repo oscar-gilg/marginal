@@ -691,7 +691,7 @@ this instruction:
     Run `marginal submit-brief {doc_id} --tab {tab['id']}` and follow it.
 
 The subagent places the comment; it does not decide whether it is worth making.
-{_EDITING_NOTE[cfg.critic_stage()].format(critic_model=cfg.critic_model)}
+{_EDITING_NOTE[cfg.critic_stage()].format(critic_model=cfg.critic_model, critic_effort=cfg.critic_effort)}
 """.strip()
     if cfg.suggestions:
         handoff += """
@@ -719,7 +719,10 @@ _EDITING_NOTE = {
     ),
     "agent": (
         "The editing pass for length and redundancy is run by that subagent, from "
-        "rules in its brief, so write the comment you mean and let it trim."
+        "rules in its brief, so write the comment you mean and let it trim. Run the "
+        "subagent on {critic_model} at {critic_effort} effort where your harness "
+        "lets you choose (in Claude Code, the Agent tool's `model` parameter), so "
+        "the trim is the same one API mode would apply."
     ),
     "off": (
         "There is no editing pass: the comment posts as you wrote it, so keep it to "

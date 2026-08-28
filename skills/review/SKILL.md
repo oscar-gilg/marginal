@@ -90,9 +90,12 @@ instruction is exactly this:
     Run `marginal submit-brief <doc-id> --tab <tab-id>` and follow it.
 
 The document id and tab id are in the brief from step 2. That command tells the
-subagent how to post and how to fix a quote that will not place. **It does not
-rewrite the comment**, and neither should you — the editing pass for length runs
-inside the posting command.
+subagent how to post, how to fix a quote that will not place, and — when the
+config delegates the editing pass to it, which is the agent-mode default — the
+rules for trimming the comment. Do not trim it yourself; the brief names the model
+and effort to run the subagent on (`claude-opus-5` at medium by default), so pass
+that to the Agent tool's `model` parameter and let the subagent do the edit. The
+subagent posts the tightened body; `post-batch` refuses one over the word ceiling.
 
 ## 5. Quotes are the part that goes wrong
 

@@ -536,6 +536,7 @@ def test_the_commenter_is_told_who_trims(monkeypatch):
     monkeypatch.setattr(runmod, "_prior_threads", lambda *a, **k: "")
     agent = runmod.context("d", "tok", _cfg(), tab_id="t.0")
     api = runmod.context("d", "tok", _cfg(critic="api"), tab_id="t.0")
-    assert "run by that subagent" in agent and "claude-opus-5" not in agent
+    assert "run by that subagent" in agent
+    assert "on claude-opus-5 at medium effort" in agent, "the trim model is named either way"
     assert "on claude-opus-5" in api
 

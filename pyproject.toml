@@ -1,6 +1,6 @@
 [project]
 name = "marginal"
-version = "0.4.1"
+version = "0.4.2"
 description = "Let a model read a Google Doc and leave native anchored comments in it."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,7 +41,6 @@ packages = ["src/marginal"]
 # prompts at all and every review fails on FileNotFoundError.
 [tool.hatch.build.targets.wheel.force-include]
 "prompts" = "marginal/prompts"
-"marginal.example.toml" = "marginal/example.toml"
 
 [dependency-groups]
 dev = [

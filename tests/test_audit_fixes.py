@@ -549,7 +549,10 @@ def test_agent_mode_commands_forbid_model_calls_unless_opted_in(monkeypatch, tmp
     seen = []
     monkeypatch.setattr(model, "forbid", lambda reason: seen.append(reason))
     monkeypatch.setattr(runmod, "submit_brief", lambda *a, **k: "")
-    monkeypatch.setattr(cli, "_token", lambda *a, **k: None, raising=False)
+    # The guard must be armed before the credential step, so the step is stubbed
+    # rather than avoided: on a machine without OAuth it exits, on one with it
+    # it reaches the network, and neither is what this test is about.
+    monkeypatch.setattr(cli.gdocs, "access_token", lambda *a, **k: "tok")
     monkeypatch.chdir(tmp_path)
     doc = "1" * 25
     for argv, local, expect in (

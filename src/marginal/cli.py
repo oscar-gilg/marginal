@@ -522,6 +522,18 @@ def _dispatch(a) -> int:
             file=sys.stderr,
         )
 
+    if a.cmd in ("context", "submit-brief", "post-batch"):
+        # Agent mode's guarantee, checked rather than assumed, and armed before
+        # any credential or network step so it holds on every machine: these call
+        # no model unless a setting says so. `critic = "api"` and
+        # `reconcile_anchors = true` are the two opt-ins.
+        if cfg.critic_stage() != "api" and not cfg.reconcile_anchors:
+            model.forbid(
+                "agent mode makes no model calls; set critic = \"api\" (or pass "
+                "--critic api) to have this tool trim comments, or "
+                "reconcile_anchors = true to let it place a quote no rule could"
+            )
+
     # Only mint a Google token for commands that actually reach the Drive API. The
     # browser source exists so a user can run with no Google credentials at all;
     # minting one up front here made that path fail before it started.
@@ -549,17 +561,6 @@ def _dispatch(a) -> int:
         print(f"# {doc['title']} — tab {tab['id']} ({len(tab['text'])} chars)\n")
         print(tab["text"])
         return 0
-
-    if a.cmd in ("context", "submit-brief", "post-batch"):
-        # Agent mode's guarantee, checked rather than assumed: these commands call
-        # no model unless a setting says so. `critic = "api"` and
-        # `reconcile_anchors = true` are the two opt-ins.
-        if cfg.critic_stage() != "api" and not cfg.reconcile_anchors:
-            model.forbid(
-                "agent mode makes no model calls; set critic = \"api\" (or pass "
-                "--critic api) to have this tool trim comments, or "
-                "reconcile_anchors = true to let it place a quote no rule could"
-            )
 
     if a.cmd == "context":
         print(context(doc_id, token, cfg, a.tab, a.focus))

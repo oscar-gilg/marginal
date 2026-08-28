@@ -160,6 +160,7 @@ then carry straight on to the next one. It is placed while you write.
 # start. It costs a comment each time, never the run — the old code returned here
 # and threw away the remaining budget over one bad quotation.
 _MAX_DROPPED = 3
+_MAX_UNCAPPED = 25
 
 # A paused turn is resumed by sending it straight back, so a provider that keeps
 # pausing would loop forever on one comment. Bounded rather than trusted.
@@ -200,7 +201,7 @@ def _rolling_cache(messages: list[dict], fixed: int) -> None:
 def propose_stream(
     doc_title: str,
     doc_text: str,
-    n: int,
+    n: int | None,
     cfg: Config,
     submitter,
     focus: str | None = None,
@@ -255,6 +256,9 @@ def propose_stream(
     dropped = 0
     paused = 0
     nudged = False
+    # No cap means the commenter decides when to stop; the ceiling is a safety stop
+    # for a run that never says DONE, not a budget the brief mentions.
+    n = _MAX_UNCAPPED if n is None else n
     while made < n and dropped < _MAX_DROPPED:
         _rolling_cache(messages, fixed)
         reply = model.exchange(

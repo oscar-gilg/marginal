@@ -284,15 +284,21 @@ def google_accounts(account: str | None = None) -> tuple[Check, list[str]]:
     )
 
 
-def preset(keys: list[str], accounts: list[str]) -> dict[str, object]:
-    """The settings these findings imply, and only the ones that differ from default.
+def preset(
+    keys: list[str], accounts: list[str], profile: Path | None = None
+) -> dict[str, object]:
+    """The machine settings these findings imply.
 
-    A config file that restates the defaults is one nobody can read for what is
-    unusual about this machine.
+    Everything that describes this machine rather than a choice — where the text
+    is read from, which Chrome profile, which Google account — so the template's
+    defaults never stand in for a path or an account that is somebody else's.
     """
     settings: dict[str, object] = {}
-    if not accounts:
-        settings["source"] = "browser"
+    settings["source"] = "api" if accounts else "browser"
+    if profile is not None:
+        settings["profile"] = str(Path(profile).expanduser().resolve())
+    if accounts:
+        settings["account"] = accounts[0]
     # No key changes nothing: `mode = "agent"` is the default and its editing pass
     # is the placing subagent's, so no setting here reaches for a model. `critic =
     # false` used to be written at this point, and it silently outlived the day a
@@ -304,15 +310,13 @@ def preset(keys: list[str], accounts: list[str]) -> dict[str, object]:
 # generated config whose lines have no reason attached is one that gets copied
 # forward long after the reason expired.
 _WHY = {
-    "source": "no Google OAuth here, so the document is read through the browser's "
-    "own session. `marginal auth ...` and this can go back to \"api\".",
+    "source": "where the document text is read from: api (Google OAuth) or the "
+    "signed-in browser's own export. `marginal auth ...` enables api.",
     "critic": "who runs the shortening pass: api (this tool, needs a key), agent "
     "(the placing subagent), off.",
-    "profile": "absolute, so the signed-in browser session is found from any "
-    "directory; a relative path would create a second, signed-out profile elsewhere.",
-    "headless": "runs stay off the desktop; the profile was signed in headful once.",
-    "mode": "who writes the comments.",
-    "account": "whose Google account posts and reads the comments.",
+    "profile": "the signed-in Chrome profile; absolute so any directory finds it.",
+    "headless": "runs stay off the desktop; sign in headful once first.",
+    "account": "the Google account that posts and reads the comments.",
 }
 
 
@@ -338,24 +342,28 @@ def render(settings: dict[str, object]) -> str:
     `# account = ...` counts); one it does not is appended at the end.
     """
     text = template()
-    head = (
-        "# Written by `marginal setup`; every setting is here with its default or\n"
-        "# this machine's value. `marginal config` prints what a run would use and\n"
-        "# where each value came from. A ./marginal.toml or a CLI flag overrides.\n"
-    )
-    # Drop the template's own "copy me" header — this *is* the copy.
-    text = head + text.split("\n\n", 1)[1]
-    missing = []
+    machine = []
     for name, value in settings.items():
         why = " ".join(ln.strip() for ln in _wrap(_WHY.get(name, ""), 0, width=200))
         line = f"{name} = {_toml_value(value)}" + (f"   # {why}" if why else "")
         pattern = re.compile(rf"^#?\s*{re.escape(name)}\s*=.*$", re.MULTILINE)
+        if name in _MACHINE:
+            machine.append(line)
+            continue
         text, n = pattern.subn(line, text, count=1)
         if n == 0:
-            missing.append(line)
-    if missing:
-        text = text.rstrip("\n") + "\n\n# --- written by setup ---\n" + "\n".join(missing) + "\n"
+            machine.append(line)
+    if machine:
+        # Above the [prompts] table, or a TOML parser would file these under it.
+        section = "# --- this machine, written by `marginal setup` ---\n" + "\n".join(machine) + "\n\n"
+        i = text.find("[prompts]")
+        text = text[:i] + section + text[i:] if i >= 0 else text + "\n" + section
     return text
+
+
+# Settings that describe the machine rather than a choice: setup fills them in,
+# the template does not show them, and nobody else's defaults are a good guess.
+_MACHINE = ("source", "port", "profile", "headless", "account", "credentials")
 
 
 def write_config(path: Path, settings: dict[str, object], force: bool) -> Check:
@@ -409,7 +417,7 @@ def run(
 
     _report(checks)
 
-    settings = preset(keys, accounts)
+    settings = preset(keys, accounts, profile=Path(cfg.profile))
     path = config_path or Path(CONFIG_NAME)
     print()
     if write:

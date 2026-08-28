@@ -100,7 +100,7 @@ def sections(
     cfg: Config,
     contract: str,
     handoff: str,
-    budget: int,
+    budget: int | None,
     focus: str | None = None,
     prior: str = "",
     suggestions: str = "",
@@ -115,7 +115,11 @@ def sections(
     on: a capability granted to one mode belongs here so both are told the same
     thing, and gating it inside `sections` means neither call site can forget.
     """
-    ask = f"Leave at most {budget} comments on this document."
+    ask = (
+        f"Leave at most {budget} comments on this document."
+        if budget
+        else "There is no comment budget: stop when nothing further is worth saying."
+    )
     if focus:
         ask += f"\n\nFocus on: {focus}"
 

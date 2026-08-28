@@ -65,7 +65,7 @@ def _commenting(p, doc: bool = True) -> None:
     if doc:
         p.add_argument("doc")
         p.add_argument("--tab")
-    p.add_argument("-n", type=int, dest="comments", help="comment budget (default: config)")
+    p.add_argument("-n", type=int, dest="comments", help="cap on comments; unset means the commenter stops when it has nothing more to say")
     p.add_argument("--mode", choices=("api", "agent"), help="who writes the comments")
     p.add_argument("--model")
     p.add_argument("--focus", help="steer what the model looks for")
@@ -135,10 +135,10 @@ def _colour(code: str, text: str) -> str:
 # the file being explained have the same shape.
 _GROUPS = (
     ("what runs", ("mode", "model", "provider", "effort", "comments", "suggestions",
-                   "source", "schedule")),
-    ("the editing pass", ("critic", "critic_model", "critic_effort", "critic_workers",
+                   "web_search", "reconcile_anchors")),
+    ("the editing pass", ("critic", "critic_model", "critic_effort",
                           "min_words", "max_words", "word_ceiling")),
-    ("browser", ("port", "profile", "headless", "strategy")),
+    ("this machine", ("source", "port", "profile", "headless")),
     ("identity", ("account", "credentials")),
     ("prompts", ("commenter_prompt", "critique_prompt", "respond_prompt")),
 )

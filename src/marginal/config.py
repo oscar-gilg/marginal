@@ -83,7 +83,10 @@ class Config:
     # because the two jobs are not equally hard.
     effort: str | None = None  # low | medium | high | xhigh | max
     provider: str = "auto"  # auto | anthropic | openrouter
-    comments: int = 5  # default comment budget
+    # A cap on comments, when the request names one ("three at most"). None is no
+    # cap: the commenter prompt already says to stop when nothing more is worth
+    # saying, and a standing default read as a target.
+    comments: int | None = None
     strategy: str = "paragraph"  # paragraph | chars
     port: int = 9222
     headless: bool = False
@@ -340,8 +343,11 @@ def _validate(cfg: Config) -> Config:
         raise ValueError(
             f"effort must be one of {_CHOICES['critic_effort']} or unset, got {cfg.effort!r}"
         )
+    if cfg.comments is not None and (
+        isinstance(cfg.comments, bool) or not isinstance(cfg.comments, int) or cfg.comments < 1
+    ):
+        raise ValueError(f"comments must be a whole number of at least 1 or unset, got {cfg.comments!r}")
     for name in (
-        "comments",
         "critic_workers",
         "min_words",
         "max_words",

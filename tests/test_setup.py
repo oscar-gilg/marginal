@@ -25,7 +25,7 @@ def test_no_credentials_at_all_still_produces_a_working_config():
 def test_a_key_and_an_account_override_nothing():
     # Every default is already the fast path, so the file should say so rather than
     # restate six settings that were never in question.
-    assert setup.preset(keys=["ANTHROPIC_API_KEY"], accounts=["me@example.com"]) == {}
+    assert setup.preset(keys=["ANTHROPIC_API_KEY"], accounts=["me@example.com"]) == {"source": "api", "account": "me@example.com"}
 
 
 def test_a_key_without_google_only_changes_where_the_text_is_read():
@@ -35,7 +35,7 @@ def test_a_key_without_google_only_changes_where_the_text_is_read():
 def test_google_without_a_key_changes_nothing():
     # Agent mode is the default, and under it the shortening pass is the placing
     # subagent's, so nothing a missing key could break is on by default.
-    assert setup.preset(keys=[], accounts=["me@example.com"]) == {}
+    assert setup.preset(keys=[], accounts=["me@example.com"]) == {"source": "api", "account": "me@example.com"}
 
 
 @pytest.mark.parametrize(
@@ -235,7 +235,7 @@ def test_a_config_that_needs_nothing_is_still_the_whole_template(tmp_path):
     path = tmp_path / "marginal.toml"
     setup.write_config(path, {}, force=False)
     text = path.read_text()
-    assert text.startswith("# Written by `marginal setup`")
+    assert text.startswith("# marginal config")
     assert '\nmode = "agent"' in text and "\ncritic = " in text
 
 
@@ -305,7 +305,7 @@ def test_a_selectable_account_is_a_working_setup(monkeypatch):
     monkeypatch.setattr(setup.auth, "select_account", lambda account=None: "a@x.com")
     check, accounts = setup.google_accounts()
     assert check.ok and accounts == ["a@x.com"]
-    assert setup.preset(keys=["K"], accounts=accounts) == {}
+    assert setup.preset(keys=["K"], accounts=accounts) == {"source": "api", "account": "a@x.com"}
 
 
 def test_a_failure_listing_accounts_is_loud_rather_than_read_as_none(monkeypatch):
@@ -507,15 +507,16 @@ def test_the_written_config_is_the_whole_template_filled_in():
     assert 'source = "browser"' in rendered and 'source = "api"' not in rendered
     assert '\naccount = "bot@example.com"' in rendered and "# account =" not in rendered
     assert "\nheadless = true" in rendered
-    for name in ("mode", "critic", "keep_tab", "tab_ttl", "commenter"):
+    for name in ("mode", "critic", "commenter"):
         assert f"\n{name} = " in rendered, name
-    assert rendered.startswith("# Written by `marginal setup`")
+    assert rendered.index("this machine") < rendered.index("[prompts]"), "machine lines must not fall under [prompts]"
+    assert rendered.startswith("# marginal config")
 
 
 def test_a_setting_the_template_lacks_is_appended(tmp_path, monkeypatch):
     rendered = setup.render({"port": 9333, "credentials": "/x/creds.json"})
     assert "\nport = 9333" in rendered
-    assert '\ncredentials = "/x/creds.json"' in rendered and "written by setup" in rendered
+    assert '\ncredentials = "/x/creds.json"' in rendered and "this machine" in rendered
 
 
 def test_the_rendered_config_loads(tmp_path, monkeypatch):

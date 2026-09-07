@@ -232,6 +232,28 @@ def model_keys() -> tuple[Check, list[str]]:
     )
 
 
+def figure_support() -> Check:
+    """Whether `publish` can shrink figures here. Optional, and said so.
+
+    Pillow is the one thing `publish` needs that the base install does not carry —
+    on purpose, because marginal has a single dependency and most drafts have no
+    figures. Checked at setup so "install marginal[publish]" is read here rather
+    than found on the first draft with a figure in it.
+    """
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        return Check(
+            "Figures (Pillow)",
+            False,
+            "not installed — optional",
+            fix="Only `publish` uses it, and only for a draft with figures. Install "
+            "`marginal[publish]` (`uv tool install 'marginal[publish]'`, or "
+            "`uvx --from 'marginal[publish]' marginal ...`).",
+        )
+    return Check("Figures (Pillow)", True, "installed")
+
+
 def google_accounts(account: str | None = None) -> tuple[Check, list[str]]:
     """Google OAuth accounts this tool owns. Optional: the browser reads without them.
 
@@ -413,7 +435,7 @@ def run(
 
     key_check, keys = model_keys()
     account_check, accounts = google_accounts(cfg.account)
-    checks += [key_check, account_check]
+    checks += [key_check, account_check, figure_support()]
 
     _report(checks)
 
@@ -444,7 +466,7 @@ def run(
 # and `respond` write to the comment list, which has no browser route at all.
 # Listed here so the one thing a credential-free install cannot do is said at setup
 # time, rather than found later when a reply fails.
-NEEDS_OAUTH = ("read", "list", "post", "reply", "unpost", "respond")
+NEEDS_OAUTH = ("read", "list", "post", "reply", "unpost", "respond", "publish")
 
 
 def _next_step(doc_url: str | None, keys: list[str], accounts: list[str]) -> str:

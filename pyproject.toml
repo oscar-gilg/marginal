@@ -1,6 +1,6 @@
 [project]
 name = "marginal"
-version = "0.4.2"
+version = "0.5.0"
 description = "Let a model read a Google Doc and leave native anchored comments in it."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,13 @@ classifiers = [
 dependencies = [
     "websocket-client>=1.7",
 ]
+
+# `publish` needs Pillow to shrink and frame figures before they are uploaded.
+# It stays an extra because the markdown most people publish has no figures in it,
+# and a text-only publish must not cost a wheel build on a machine that will never
+# render one. `publish.py` imports PIL lazily and says this name when it is absent.
+[project.optional-dependencies]
+publish = ["pillow>=10"]
 
 [project.urls]
 Homepage = "https://github.com/oscar-gilg/marginal"

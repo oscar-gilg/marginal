@@ -71,8 +71,8 @@ inside it.
 
 **What the first row cannot do.** `comment`, `review`, `context`, `submit-brief`
 and `post-batch` all work with no Google credentials: they read through the browser
-export and verify through it too. `read`, `list`, `post`, `reply`, `unpost` and
-`respond` mint a token whatever the source, and exit with a message naming what to
+export and verify through it too. `read`, `list`, `post`, `reply`, `unpost`, `respond`
+and `publish` mint a token whatever the source, and exit with a message naming what to
 run if there is none. `reply`, `unpost` and `respond` write to the comment list,
 which has no browser route at all; `read`, `list` and `post` could have one and do
 not yet.
@@ -125,6 +125,9 @@ marginal respond <doc-url>                # answer replies to our comments
 marginal post    <doc-url> -q "exact quote" -b "comment text"
 marginal reply   <doc-url> -c <comment-id> -b "reply text"
 marginal unpost  <doc-url> -c <comment-id>
+marginal publish draft.md --title "Post draft"              # a new Doc from Markdown
+marginal publish draft.md --doc <doc-url> --tab-title "v2 — 07-09"   # the next version, as a new tab
+marginal list    <doc-url> --full          # every comment thread, untruncated
 ```
 
 From a checkout, `uv sync` once and prefix each with `uv run`.
@@ -177,6 +180,47 @@ carrying *pending* suggestions, anchors downstream of them may fail to select
 (the caret traverses struck-through text that the character stream does not
 count). Accepting or rejecting the pending suggestions and rerunning clears the
 second.
+
+## Publishing a draft
+
+The reverse direction: a Markdown file goes *into* a Google Doc so that people can
+comment on it there, and each revision goes in as a **new tab** of the same Doc.
+
+```bash
+marginal publish draft.md --title "Post draft"                       # v1, creates the Doc
+marginal publish draft.md --doc <doc-url> --tab-title "v2 — 07-09"   # v2, a new tab
+marginal list <doc-url> --full                                        # what came back
+```
+
+One Doc per draft and one tab per version, because Docs cannot rewrite a tab in
+place through the API and a tab with comments on it is the record. The user keeps
+one link and one comment history; the Markdown file stays the source of truth.
+
+The renderer does not convert a file. It parses a small Markdown subset — headings,
+paragraphs with bold/italic/code/links, nested bullet and numbered lists, pipe
+tables, blockquotes, and figures on their own line — and issues the Docs
+`batchUpdate` requests itself, asserting the tab's end index after every batch
+against what the request arithmetic predicted. Then it re-reads the tab and checks
+its heading, table and image counts against the parsed Markdown; on a mismatch it
+deletes the tab (or trashes the Doc it had just created) and exits 3, so a failed
+publish leaves nothing behind. Anything outside that subset — fenced code, HTML,
+footnotes — comes out as literal text, on purpose: a converter that guessed is how
+the earlier `.docx` route produced list artifacts nobody asked for.
+
+Figures are shrunk (≤1100 px, hairline border) and uploaded as temporary Drive
+files shared to anyone-with-the-link, because `insertInlineImage` fetches its URI
+unauthenticated. Docs takes its own copy at insertion; the command re-reads the doc
+and only unshares and trashes the uploads once every image's `contentUri` is a
+`googleusercontent.com` copy. If one still pointed at the upload, the uploads are
+left in place and named on stderr rather than silently breaking the images.
+Shrinking needs Pillow, which the base install does not carry; install
+`marginal[publish]` (or `uvx --from 'marginal[publish]' marginal …`) when a draft
+has figures. A draft without figures needs nothing extra.
+
+`publish` needs Google OAuth; there is no browser route for creating a Doc. The
+`/marginal:publish` skill runs the whole loop for a coding agent: publish, read the
+comments, revise the file, publish the next tab, and report per comment what was
+done with it.
 
 ## How it works
 

@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import warnings
 from pathlib import Path
 
@@ -85,9 +87,79 @@ def _call(url: str, token: str, method: str = "GET", body: dict | None = None) -
     if data:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-        raw = r.read()
+    return _send(req, method, url)
+
+
+class GoogleApiError(RuntimeError):
+    """A Google endpoint answered with an error status; the message names why."""
+
+
+def _send(req: urllib.request.Request, method: str, url: str) -> dict:
+    """Make one Google call and decode its JSON answer, or raise `GoogleApiError`.
+
+    Every call goes through here, so the timeout, the failure wrapping and the
+    empty-body convention are one decision rather than one per endpoint — the
+    duplicate of these three lines under the upload path is exactly where a gap
+    in the wrapping was found last time.
+
+    An answer that is not JSON is left to raise as itself: it means something
+    that is not the Docs API is answering — a captive portal, a proxy's error
+    page — and calling that a `GoogleApiError` would send the reader looking for
+    a Google-side cause.
+    """
+    raw = _send_bytes(req, method, url)
     return json.loads(raw) if raw else {}
+
+
+def _send_bytes(req: urllib.request.Request, method: str, url: str) -> bytes:
+    """The same call for an endpoint whose answer is not JSON — the Drive export."""
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return r.read()
+    except urllib.error.URLError as e:
+        raise GoogleApiError(_describe(e, method, url)) from None
+
+
+def _describe(e: "urllib.error.URLError", method: str, url: str) -> str:
+    """One line: the status if there was one, the API's own words, and which call.
+
+    Google puts the reason in the JSON body — "Unknown name X", "insufficient
+    permissions" — and `HTTPError` shows only "400: Bad Request", which is the
+    difference between a fix and a guess.
+
+    A failure that never reached an HTTP status has neither code nor body: DNS
+    that does not resolve, a refused connection, an expired certificate. Since
+    `HTTPError` is a `URLError`, both arrive here and both leave naming the call
+    they died in. Left unwrapped the second kind escaped as a bare socket error,
+    which told the caller nothing about which of a render's dozens of calls had
+    died — and slid past every `except GoogleApiError` that exists to undo a
+    half-made publish.
+    """
+    path = urllib.parse.urlsplit(url).path
+    if not isinstance(e, urllib.error.HTTPError):
+        return f"{method} {path}: {e.reason}"
+    try:
+        why = json.loads(e.read().decode("utf-8", "replace"))["error"]["message"]
+    except Exception:
+        why = e.reason
+    return f"HTTP {e.code} from {method} {path}: {why}"
+
+
+def _call_bytes(
+    url: str, token: str, *, method: str = "POST", body: bytes, content_type: str
+) -> dict:
+    """`_call` for a body that is not JSON — the multipart Drive upload.
+
+    Separate rather than a flag on `_call` because the two differ in the only
+    interesting way: `_call` owns its encoding and can therefore never send a
+    malformed body, while this one is handed bytes somebody else framed. A
+    multipart body with the boundary wrong is accepted by urllib and rejected by
+    Drive with a message about the metadata part, which is a long way from the
+    line that built it.
+    """
+    headers = {"Authorization": "Bearer " + token, "Content-Type": content_type}
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    return _send(req, method, url)
 
 
 # --- document text -----------------------------------------------------------
@@ -246,8 +318,7 @@ def export_markdown(doc_id: str, token: str) -> str:
         f"?mimeType={urllib.parse.quote('text/markdown')}"
     )
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-        return r.read().decode("utf-8")
+    return _send_bytes(req, "GET", url).decode("utf-8")
 
 
 def read_doc(doc_id: str, token: str) -> dict:
@@ -307,4 +378,125 @@ def delete_comment(doc_id: str, comment_id: str, token: str) -> None:
         f"https://www.googleapis.com/drive/v3/files/{doc_id}/comments/{comment_id}",
         token,
         method="DELETE",
+    )
+
+
+# --- writing documents -------------------------------------------------------
+#
+# Everything below exists for `publish.py`, which renders a markdown file into a
+# tab. Reading a document needs one endpoint; writing one needs the Docs
+# batchUpdate API for structure and the Drive API for the temporary image files
+# an inline image has to be fetched from, so both live here rather than being
+# spread across the module that happens to call them.
+
+_DRIVE = "https://www.googleapis.com/drive/v3"
+_UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
+_DOCS = "https://docs.googleapis.com/v1"
+
+
+def create_document(title: str, token: str) -> dict:
+    """Create an empty Doc and return the Docs API's `documents.create` response.
+
+    Docs rather than Drive, because the response carries the tab structure of the
+    new document. Creating it through Drive returns a file resource with no
+    `tabs`, and the caller would have to fetch the document again just to learn
+    the id of the single tab it already knows exists.
+    """
+    return _call(f"{_DOCS}/documents", token, method="POST", body={"title": title})
+
+
+def batch_update(doc_id: str, requests: list[dict], token: str) -> dict:
+    return _call(
+        f"{_DOCS}/documents/{doc_id}:batchUpdate",
+        token,
+        method="POST",
+        body={"requests": requests},
+    )
+
+
+def add_tab(doc_id: str, title: str, token: str) -> dict:
+    """Append a tab and return its `tabProperties`, which carry the new tabId.
+
+    The id is only ever reported here. There is no way to ask for a tab by title
+    afterwards that is not ambiguous the moment two versions share a name, and
+    every subsequent request in the render is scoped by this id — so a reply that
+    arrives without one is a hard failure, not something to work around.
+    """
+    payload = batch_update(doc_id, [{"addDocumentTab": {"tabProperties": {"title": title}}}], token)
+    props = (payload.get("replies") or [{}])[0].get("addDocumentTab", {}).get("tabProperties")
+    if not props or not props.get("tabId"):
+        raise GoogleApiError(f"addDocumentTab returned no tabId: {json.dumps(payload)[:400]}")
+    return props
+
+
+def delete_tab(doc_id: str, tab_id: str, token: str) -> dict:
+    return batch_update(doc_id, [{"deleteTab": {"tabId": tab_id}}], token)
+
+
+def update_tab_title(doc_id: str, tab_id: str, title: str, token: str) -> dict:
+    """Rename an existing tab. Used to name the default tab of a new document."""
+    return batch_update(
+        doc_id,
+        [
+            {
+                "updateDocumentTabProperties": {
+                    "tabProperties": {"tabId": tab_id, "title": title},
+                    "fields": "title",
+                }
+            }
+        ],
+        token,
+    )
+
+
+def upload_png(path: Path, token: str) -> dict:
+    """Upload a PNG as an ordinary Drive file — no conversion — and return {id, name}.
+
+    `insertInlineImage` takes a URI that Google's servers fetch, so the bytes have
+    to be somewhere reachable before the render starts. This is that somewhere;
+    `share_anyone` makes it reachable and `unshare`/`trash` take it away again once
+    Docs has copied it.
+    """
+    boundary = uuid.uuid4().hex
+    metadata = json.dumps({"name": path.name, "mimeType": "image/png"}).encode()
+    sep = f"--{boundary}\r\n".encode()
+    body = (
+        sep
+        + b"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+        + metadata
+        + b"\r\n"
+        + sep
+        + b"Content-Type: image/png\r\n\r\n"
+        + path.read_bytes()
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+    return _call_bytes(
+        f"{_UPLOAD}?uploadType=multipart&fields=id,name",
+        token,
+        body=body,
+        content_type=f"multipart/related; boundary={boundary}",
+    )
+
+
+def share_anyone(file_id: str, token: str) -> dict:
+    """Make a file world-readable and return the permission, whose id revokes it."""
+    return _call(
+        f"{_DRIVE}/files/{file_id}/permissions?fields=id",
+        token,
+        method="POST",
+        body={"type": "anyone", "role": "reader"},
+    )
+
+
+def unshare(file_id: str, permission_id: str, token: str) -> None:
+    _call(f"{_DRIVE}/files/{file_id}/permissions/{permission_id}", token, method="DELETE")
+
+
+def trash(file_id: str, token: str) -> dict:
+    """Move a Drive file to the trash. Recoverable, unlike `files.delete`."""
+    return _call(
+        f"{_DRIVE}/files/{file_id}?fields=id,name,trashed",
+        token,
+        method="PATCH",
+        body={"trashed": True},
     )

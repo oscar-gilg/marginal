@@ -29,13 +29,19 @@ document, the document) is deleted, because a half-written version people can
 open is worse than no version at all.
 
 **Images are borrowed, not given.** `insertInlineImage` takes a URI that Google's
-own servers fetch, so each figure is uploaded to Drive and shared publicly for
-the length of the render. Docs then re-hosts it under googleusercontent.com. Only
-once every `contentUri` in the finished tab is a googleusercontent one — proof
-that Docs took its own copy — is the temporary file unshared and trashed. Revoke
-earlier and the tab shows broken images; skip the check and a world-readable copy
-of every figure is left on the account, so when the proof does not arrive the
-files are left in place and named on stderr rather than quietly abandoned.
+own servers fetch, so each local figure is uploaded to Drive and shared publicly
+for the length of the render; a figure that is already a URL is passed straight
+through, because Docs can fetch that itself and a copy on our Drive would be
+republishing somebody else's image. Docs then re-hosts what it fetched under
+googleusercontent.com. Only once every `contentUri` in the finished tab is a
+googleusercontent one — proof that Docs took its own copy — is the temporary file
+unshared and trashed, in that order: a trashed Drive file is still served to
+anyone holding its link. Revoke earlier and the tab shows broken images; skip the
+check and a world-readable copy of every figure is left on the account, so when
+the proof does not arrive the files are left in place and named on stderr rather
+than quietly abandoned. Handing the copies back is the last step and never the
+fatal one — the document is already verified by then, and a Drive error while
+tidying up must not undo a publish that worked.
 
 Pillow is an optional dependency and is imported only when the markdown actually
 references a figure; a text-only publish works on a bare install.
@@ -45,6 +51,7 @@ from __future__ import annotations
 
 import datetime
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -112,19 +119,24 @@ def repo_root(source: Path) -> Path:
     return here
 
 
-def figure_paths(source: Path) -> list[Path]:
-    """Every distinct local figure the markdown references, in order.
+def figure_targets(source: Path) -> dict[str, Path]:
+    """Every local figure reference, keyed by the target exactly as written.
 
     Relative paths resolve against the markdown file's own directory first and
     the enclosing repository root second. That order is the general one: a
     markdown file is usually written to be read where it sits, and a path that
     only works from a repository root is the special case, not the default.
-    Remote images are left alone — Docs can fetch those itself.
+    Remote images are left out entirely — Docs fetches those itself.
+
+    Keyed by the written target rather than returning bare paths because that
+    string is what the renderer later has to find a shrunk copy by. Resolving it
+    a second time at render time, from the basename, is how `a/chart.png` and
+    `b/chart.png` became one figure repeated twice in the tab.
     """
     root = repo_root(source)
-    seen: list[Path] = []
+    found: dict[str, Path] = {}
     for _, target in IMAGE_RE.findall(source.read_text()):
-        if target.startswith(("http://", "https://")):
+        if target.startswith(("http://", "https://")) or target in found:
             continue
         if Path(target).is_absolute():
             candidate = Path(target)
@@ -137,9 +149,13 @@ def figure_paths(source: Path) -> list[Path]:
                 f"figure referenced by {source.name} not found: {target}\n"
                 f"  looked in {source.parent} and {root}"
             )
-        if candidate not in seen:
-            seen.append(candidate)
-    return seen
+        found[target] = candidate
+    return found
+
+
+def figure_paths(source: Path) -> list[Path]:
+    """Every distinct local figure file the markdown references, in order."""
+    return list(dict.fromkeys(figure_targets(source).values()))
 
 
 def _pillow():
@@ -151,14 +167,22 @@ def _pillow():
     return Image, ImageOps
 
 
-def shrink_figures(figures: list[Path], out_dir: Path) -> int:
-    """Downscale, frame and quantize each figure into `out_dir`. Returns total bytes.
+def shrink_figures(figures: list[Path], out_dir: Path) -> tuple[int, dict[Path, Path]]:
+    """Downscale, frame and quantize each figure into `out_dir`.
+
+    Returns the total bytes written and a {source file: shrunk copy} mapping.
+    The copies are named by their position in the list rather than by their
+    original basename: two figures called `chart.png`, in different directories,
+    both used to be written to `out_dir/chart.png`, so the second silently
+    overwrote the first and the finished tab showed one of them twice. The
+    mapping is returned rather than reconstructed later for the same reason —
+    a basename is not an identity.
 
     Returns before touching Pillow when there is nothing to shrink, which is what
     makes the dependency genuinely optional rather than optional-until-you-run-it.
     """
     if not figures:
-        return 0
+        return 0, {}
     Image, ImageOps = _pillow()
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -166,7 +190,8 @@ def shrink_figures(figures: list[Path], out_dir: Path) -> int:
     # The frame is added to the pixels, so the resize aims at the inner box and
     # the framed figure still lands on MAX_FIGURE_WIDTH.
     inner_width = MAX_FIGURE_WIDTH - 2 * FIGURE_BORDER_PX
-    for figure in figures:
+    shrunk: dict[Path, Path] = {}
+    for number, figure in enumerate(figures, start=1):
         image = Image.open(figure)
         if image.mode not in ("RGB", "L"):
             image = image.convert("RGB")
@@ -176,10 +201,11 @@ def shrink_figures(figures: list[Path], out_dir: Path) -> int:
         fill = FIGURE_BORDER_COLOR if image.mode == "RGB" else 0
         image = ImageOps.expand(image, border=FIGURE_BORDER_PX, fill=fill)
         image = image.quantize(colors=QUANTIZE_COLORS)
-        target = out_dir / figure.name
+        target = out_dir / f"figure-{number:02d}{figure.suffix or '.png'}"
         image.save(target, optimize=True)
         total += target.stat().st_size
-    return total
+        shrunk[figure] = target
+    return total, shrunk
 
 
 # --- markdown ----------------------------------------------------------------
@@ -553,16 +579,23 @@ class TabWriter:
 
     # ---- composite blocks
 
-    def image(self, uri: str, caption: str, width_pt: float, height_pt: float) -> None:
+    def image(self, uri: str, caption: str, width_pt: float,
+              height_pt: float | None = None) -> None:
+        """Insert one image with its caption. `height_pt` may be left unstated.
+
+        Docs derives the missing dimension from the image's own resolution, which
+        is the only option for a figure this tool never sees: a remote image is
+        fetched by Google, not by us, so its aspect ratio is not ours to compute.
+        """
         start = self.pos
+        size = {"width": {"magnitude": width_pt, "unit": "PT"}}
+        if height_pt is not None:
+            size["height"] = {"magnitude": height_pt, "unit": "PT"}
         self.reqs.append({
             "insertInlineImage": {
                 "location": self.loc(start),
                 "uri": uri,
-                "objectSize": {
-                    "width": {"magnitude": width_pt, "unit": "PT"},
-                    "height": {"magnitude": height_pt, "unit": "PT"},
-                },
+                "objectSize": size,
             }
         })
         # The image occupies exactly one index unit; the caption goes into a
@@ -660,9 +693,14 @@ class TabWriter:
         return cells
 
 
-def render_blocks(writer: TabWriter, blocks: list[dict], figures_dir: Path,
+def render_blocks(writer: TabWriter, blocks: list[dict], locals_: dict[str, Path],
                   images: dict[str, str]) -> None:
-    """Render parsed blocks into the tab. `images` maps figure path -> fetchable URI."""
+    """Render parsed blocks into the tab.
+
+    `images` maps each figure's written target to the URI Docs will fetch;
+    `locals_` maps the local ones to their shrunk copy on disk. A target missing
+    from `locals_` is a remote image, which has no copy and no dimensions here.
+    """
     index = 0
     while index < len(blocks):
         block = blocks[index]
@@ -702,16 +740,21 @@ def render_blocks(writer: TabWriter, blocks: list[dict], figures_dir: Path,
         elif kind == "table":
             writer.table(block["rows"])
         elif kind == "image":
-            Image, _ = _pillow()
-            local = figures_dir / Path(block["path"]).name
-            with Image.open(local) as handle:
-                ratio = handle.height / handle.width
-            writer.image(
-                images[block["path"]],
-                f"{block['alt']}  [{block['path']}]".strip(),
-                FIGURE_WIDTH_PT,
-                round(FIGURE_WIDTH_PT * ratio, 2),
-            )
+            target = block["path"]
+            caption = f"{block['alt']}  [{target}]".strip()
+            local = locals_.get(target)
+            if local is None:
+                # Remote: there is no file here to measure, so only the width is
+                # stated and Docs keeps the aspect ratio. Opening Pillow for a
+                # figure we never downloaded would also make a remote-only draft
+                # need the optional extra for nothing.
+                writer.image(images[target], caption, FIGURE_WIDTH_PT)
+            else:
+                Image, _ = _pillow()
+                with Image.open(local) as handle:
+                    ratio = handle.height / handle.width
+                writer.image(images[target], caption, FIGURE_WIDTH_PT,
+                             round(FIGURE_WIDTH_PT * ratio, 2))
         else:  # pragma: no cover - the parser emits nothing else
             raise RenderError(f"unhandled block kind {kind!r}")
         index += 1
@@ -721,23 +764,33 @@ def render_blocks(writer: TabWriter, blocks: list[dict], figures_dir: Path,
 # --- the shared render path --------------------------------------------------
 
 
-def _prepare(source: Path, note: str, out) -> tuple[list[dict], Path]:
-    """Shrink the figures and parse the markdown. No network, nothing created yet."""
+def _prepare(source: Path, note: str, out) -> tuple[list[dict], dict[str, Path], Path]:
+    """Shrink the figures and parse the markdown. No network, nothing created yet.
+
+    Returns the parsed blocks, a {figure target: shrunk copy} mapping for the
+    local figures, and the temporary directory holding those copies — which the
+    caller must remove. The directory is named in the return rather than in the
+    progress line because it is scaffolding, not a result: printing it invited
+    the reader to go and look at a directory that is deleted by the time the
+    command exits.
+    """
     source = Path(source)
     if not source.exists():
         raise PublishError(f"source markdown not found: {source}")
 
-    figures = figure_paths(source)
-    figures_dir = Path(tempfile.mkdtemp(prefix="marginal-publish-")) / "figures"
-    total = shrink_figures(figures, figures_dir)
+    targets = figure_targets(source)
+    figures = list(dict.fromkeys(targets.values()))
+    workdir = Path(tempfile.mkdtemp(prefix="marginal-publish-"))
+    total, shrunk = shrink_figures(figures, workdir / "figures")
+    locals_ = {target: shrunk[path] for target, path in targets.items()}
     if figures:
-        out(f"figures: {len(figures)} shrunk to {total // 1024} KB in {figures_dir}")
+        out(f"figures: {len(figures)} shrunk to {total // 1024} KB")
 
     blocks = parse_markdown(source, note=note)
     counts = _expected(blocks)
     out(f"parsed:  {len(blocks)} blocks, {counts['headings']} headings, "
         f"{counts['tables']} tables, {counts['images']} images")
-    return blocks, figures_dir
+    return blocks, locals_, workdir
 
 
 def _expected(blocks: list[dict]) -> dict:
@@ -748,78 +801,130 @@ def _expected(blocks: list[dict]) -> dict:
     }
 
 
-def _render_into(doc_id: str, tab_id: str, blocks: list[dict], figures_dir: Path,
-                 token: str, out) -> None:
-    """Upload the figures, render the blocks, verify the result, release the figures.
+def _release(uploads: dict[str, dict], token: str) -> list[str]:
+    """Revoke the public link, then trash. Best effort; returns what was left behind.
+
+    Unshare *before* trash, always. A trashed Drive file is still served to
+    anyone holding its link until it is purged, so trashing alone leaves every
+    figure of every draft world-readable — the exact state this whole dance
+    exists to avoid.
+
+    Each copy is released under its own guard so one Drive failure cannot strand
+    the rest, and never raises: by the time this runs the document may already be
+    correct, and a tidy-up error must not be mistaken for a render failure.
+    """
+    left: list[str] = []
+    for path, info in uploads.items():
+        try:
+            if info["permission"]:
+                gdocs.unshare(info["id"], info["permission"], token)
+            gdocs.trash(info["id"], token)
+        except Exception as exc:
+            left.append(info["id"])
+            print(f"warn: temporary Drive copy of {path} LEFT IN PLACE as {info['id']}, "
+                  f"possibly still world-readable: {exc}", file=sys.stderr)
+    return left
+
+
+def _render_into(doc_id: str, tab_id: str, blocks: list[dict], locals_: dict[str, Path],
+                 token: str, out) -> tuple[dict, dict, int]:
+    """Upload the figures, render the blocks, verify the result.
 
     The one path both entry points take, so `publish` and `publish-tab` cannot
     render the same markdown two different ways. Raises `RenderError` when the
     render fails or the finished tab does not match the parsed markdown, having
-    first trashed its own temporary uploads; the caller decides whether the
+    first released its own temporary uploads; the caller decides whether the
     wreckage to remove is a tab or a whole document.
+
+    Returns `(uploads, the verified document, expected image count)` and stops
+    there. Releasing the uploads is deliberately the caller's next step rather
+    than the tail of this one: it happens after the tab is known to be good, and
+    a Drive error while tidying up used to arrive as a `RenderError` and trash a
+    document that had already verified.
     """
     expected = _expected(blocks)
 
-    # Every distinct figure path gets one temporary, world-readable Drive copy —
+    # Every distinct local figure gets one temporary, world-readable Drive copy —
     # Docs fetches the image by URI from its own servers, so a private file is
-    # simply not visible to it.
+    # simply not visible to it. A remote figure is already a URI Google can
+    # fetch; copying it to Drive would republish somebody else's image.
     uploads: dict[str, dict] = {}
     uris: dict[str, str] = {}
-    for block in blocks:
-        if block["kind"] != "image" or block["path"] in uploads:
-            continue
-        local = figures_dir / Path(block["path"]).name
-        meta = gdocs.upload_png(local, token)
-        permission = gdocs.share_anyone(meta["id"], token)
-        uploads[block["path"]] = {"id": meta["id"], "permission": permission["id"]}
-        uris[block["path"]] = f"https://drive.google.com/uc?export=view&id={meta['id']}"
+    try:
+        for block in blocks:
+            if block["kind"] != "image" or block["path"] in uris:
+                continue
+            target = block["path"]
+            if target.startswith(("http://", "https://")):
+                uris[target] = target
+                continue
+            meta = gdocs.upload_png(locals_[target], token)
+            # Recorded before it is shared, so a share that fails still leaves a
+            # file the rollback below knows about rather than an orphan.
+            uploads[target] = {"id": meta["id"], "permission": None}
+            permission = gdocs.share_anyone(meta["id"], token)
+            uploads[target]["permission"] = permission["id"]
+            uris[target] = f"https://drive.google.com/uc?export=view&id={meta['id']}"
+    except Exception as exc:
+        # Outside the rollback envelope this loop used to leave every copy made
+        # before the failure public on the account forever: the caller deleted
+        # the tab and nothing ever touched Drive again.
+        _release(uploads, token)
+        raise RenderError(str(exc)) from exc
     if uploads:
         out(f"drive:   {len(uploads)} temporary image(s) uploaded and shared")
 
-    def cleanup_images() -> None:
-        for path, info in uploads.items():
-            try:
-                gdocs.trash(info["id"], token)
-            except Exception as exc:  # pragma: no cover - best effort
-                print(f"warn: could not trash {path} copy {info['id']}: {exc}", file=sys.stderr)
-
     try:
         writer = TabWriter(doc_id, tab_id, token)
-        render_blocks(writer, blocks, figures_dir, uris)
+        render_blocks(writer, blocks, locals_, uris)
         doc = gdocs.get_tabs(doc_id, token)
         stats = tab_stats(doc, tab_id)
     except Exception as exc:
-        cleanup_images()
+        _release(uploads, token)
         raise RenderError(str(exc)) from exc
 
     out(f"verify:  headings {stats['headings']}/{expected['headings']}, "
         f"tables {stats['tables']}/{expected['tables']}, "
         f"images {stats['images']}/{expected['images']}")
     if stats != expected:
-        cleanup_images()
+        _release(uploads, token)
         raise RenderError("the rendered tab does not match the parsed markdown")
     out("verify:  ok")
+    return uploads, doc, expected["images"]
 
-    # Only once Docs has taken its own copy of every image is it safe to revoke
-    # the sharing and trash the upload; otherwise the tab would show dead images.
-    if uploads:
-        hosted_all = image_content_uris(doc, tab_id)
-        hosted = [uri for uri in hosted_all if "googleusercontent.com" in uri]
-        if len(hosted) == len(hosted_all) == expected["images"]:
-            for path, info in uploads.items():
-                gdocs.unshare(info["id"], info["permission"], token)
-                gdocs.trash(info["id"], token)
+
+def _release_images(uploads: dict[str, dict], doc: dict, tab_id: str, images: int,
+                    token: str, out) -> None:
+    """Give back the temporary Drive copies now the tab is known to be good.
+
+    Only once Docs has taken its own copy of every image is it safe to revoke the
+    sharing and trash the upload; otherwise the tab would show dead images. When
+    that proof does not arrive the copies are left in place and named, because a
+    world-readable copy of every figure quietly abandoned on the account is the
+    worse of the two failures.
+
+    Nothing here is fatal. Verification has already passed, so the document is
+    correct and the exit code says so; what can go wrong is only ever leftover
+    scaffolding, which is reported and not raised.
+    """
+    if not uploads:
+        return
+    hosted_all = image_content_uris(doc, tab_id)
+    hosted = [uri for uri in hosted_all if "googleusercontent.com" in uri]
+    if len(hosted) == len(hosted_all) == images:
+        left = _release(uploads, token)
+        if left:
+            out(f"images:  {len(uploads) - len(left)} of {len(uploads)} temporary Drive "
+                f"copies released; {len(left)} left in place (see the warnings above)")
+        else:
             out(f"images:  {len(hosted)} re-hosted by Docs; temporary Drive copies "
                 "unshared and trashed")
-        else:
-            # Not an error — the tab is correct — but a world-readable copy of
-            # every figure is still on the account, and saying nothing about that
-            # is how it stays there.
-            print("images:  contentUri still points at the source - temporary Drive copies "
-                  "LEFT IN PLACE and still world-readable; delete them by hand:",
-                  file=sys.stderr)
-            for path, info in uploads.items():
-                print(f"  {path} -> {info['id']}", file=sys.stderr)
+        return
+    print("images:  contentUri still points at the source - temporary Drive copies "
+          "LEFT IN PLACE and still world-readable; delete them by hand:",
+          file=sys.stderr)
+    for path, info in uploads.items():
+        print(f"  {path} -> {info['id']}", file=sys.stderr)
 
 
 # --- entry points ------------------------------------------------------------
@@ -838,32 +943,40 @@ def publish_tab(doc_id: str, source, tab_title: str, note: str, token: str, out=
     half-written tab is visible to everyone the document is shared with, and it
     is indistinguishable from a version somebody meant to publish.
     """
-    blocks, figures_dir = _prepare(Path(source), note, out)
+    blocks, locals_, workdir = _prepare(Path(source), note, out)
 
+    # The shrunk copies are scaffolding for one render; left behind they
+    # accumulate a directory of every figure of every draft in the system
+    # temporary directory, which nothing ever cleans up.
     try:
-        props = gdocs.add_tab(doc_id, tab_title, token)
-    except RuntimeError as exc:
-        # `add_tab` raises when the reply carries no tabId, which means the Docs
-        # API answered in a shape this code does not know. Nothing was created,
-        # so it is a message rather than a traceback — but it is not a message
-        # the user can act on, so it says what the server said.
-        raise PublishError(f"could not add a tab to {doc_id}: {exc}") from exc
-    tab_id = props["tabId"]
-    out(f"tab:     {tab_id} ({props.get('title')}) index={props.get('index')}")
+        try:
+            props = gdocs.add_tab(doc_id, tab_title, token)
+        except RuntimeError as exc:
+            # `add_tab` raises when the reply carries no tabId, which means the
+            # Docs API answered in a shape this code does not know. Nothing was
+            # created, so it is a message rather than a traceback — but it is not
+            # a message the user can act on, so it says what the server said.
+            raise PublishError(f"could not add a tab to {doc_id}: {exc}") from exc
+        tab_id = props["tabId"]
+        out(f"tab:     {tab_id} ({props.get('title')}) index={props.get('index')}")
 
-    try:
-        _render_into(doc_id, tab_id, blocks, figures_dir, token, out)
-    except RenderError as exc:
-        print(f"render failed: {exc}", file=sys.stderr)
-        print(f"cleanup: deleting tab {tab_id}", file=sys.stderr)
-        gdocs.delete_tab(doc_id, tab_id, token)
-        return 3
+        try:
+            uploads, doc, images = _render_into(doc_id, tab_id, blocks, locals_, token, out)
+        except RenderError as exc:
+            print(f"render failed: {exc}", file=sys.stderr)
+            print(f"cleanup: deleting tab {tab_id}", file=sys.stderr)
+            gdocs.delete_tab(doc_id, tab_id, token)
+            return 3
 
-    # Docs hands back tabIds already prefixed with "t."; the anchor is ?tab=t.<id>.
-    anchor = tab_id if tab_id.startswith("t.") else f"t.{tab_id}"
-    out("")
-    out(f"https://docs.google.com/document/d/{doc_id}/edit?tab={anchor}")
-    return 0
+        _release_images(uploads, doc, tab_id, images, token, out)
+
+        # Docs hands back tabIds already prefixed with "t."; the anchor is ?tab=t.<id>.
+        anchor = tab_id if tab_id.startswith("t.") else f"t.{tab_id}"
+        out("")
+        out(f"https://docs.google.com/document/d/{doc_id}/edit?tab={anchor}")
+        return 0
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def publish_doc(title: str, source, tab_title: str, note: str, token: str, out=print) -> int:
@@ -878,27 +991,39 @@ def publish_doc(title: str, source, tab_title: str, note: str, token: str, out=p
     before this call, so there is nothing to preserve, and a document cannot be
     left with zero tabs anyway.
     """
-    blocks, figures_dir = _prepare(Path(source), note, out)
-
-    created = gdocs.create_document(title, token)
-    doc_id = created.get("documentId")
-    if not doc_id:
-        raise PublishError(f"documents.create returned no documentId: {created!r}")
-    tab_id = _default_tab(created, doc_id, token)
-    out(f"created: {doc_id} (tab {tab_id})")
+    blocks, locals_, workdir = _prepare(Path(source), note, out)
 
     try:
-        gdocs.update_tab_title(doc_id, tab_id, tab_title, token)
-        _render_into(doc_id, tab_id, blocks, figures_dir, token, out)
-    except (RenderError, gdocs.GoogleApiError) as exc:
-        print(f"render failed: {exc}", file=sys.stderr)
-        print(f"cleanup: trashing the new document {doc_id}", file=sys.stderr)
-        gdocs.trash(doc_id, token)
-        return 3
+        created = gdocs.create_document(title, token)
+        doc_id = created.get("documentId")
+        if not doc_id:
+            raise PublishError(f"documents.create returned no documentId: {created!r}")
 
-    out("")
-    out(f"https://docs.google.com/document/d/{doc_id}/edit")
-    return 0
+        # `_default_tab` sits inside the cleanup, not before it. Its fallback
+        # fetch is a network call like any other, and a document created one line
+        # earlier used to survive that call failing — a titled, empty file left on
+        # the account by the very function whose contract is to leave nothing.
+        try:
+            tab_id = _default_tab(created, doc_id, token)
+            out(f"created: {doc_id} (tab {tab_id})")
+            gdocs.update_tab_title(doc_id, tab_id, tab_title, token)
+            uploads, doc, images = _render_into(doc_id, tab_id, blocks, locals_, token, out)
+        except (PublishError, gdocs.GoogleApiError) as exc:
+            print(f"publish failed: {exc}", file=sys.stderr)
+            print(f"cleanup: trashing the new document {doc_id}", file=sys.stderr)
+            gdocs.trash(doc_id, token)
+            return 3
+
+        # Past this line the document has verified, so nothing left to do may
+        # trash it: the release of the temporary uploads reports its own failures
+        # and the command still exits 0.
+        _release_images(uploads, doc, tab_id, images, token, out)
+
+        out("")
+        out(f"https://docs.google.com/document/d/{doc_id}/edit")
+        return 0
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _default_tab(created: dict, doc_id: str, token: str) -> str:

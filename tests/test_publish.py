@@ -12,6 +12,7 @@ disagrees with that stream, the same failure fires here as would fire live.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -39,6 +40,24 @@ class Image:
         self.uri = uri
 
 
+class Marker:
+    """A structural element of a table, occupying exactly one index unit.
+
+    Docs' index space counts structure as well as characters: a table costs one
+    index, each row inside it one, each cell one, and each cell's paragraph ends
+    in its own newline. A fake that inserted only the cell text would put every
+    offset after a table wrong by `1 + rows * (1 + columns)` — and since the
+    writer reads its cell offsets back from the server rather than predicting
+    them, a fake that got this wrong would agree with itself and prove nothing.
+    """
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<{self.kind}>"
+
+
 class FakeDocs:
     """A minimal, honest model of one tab of a Google Doc.
 
@@ -57,6 +76,31 @@ class FakeDocs:
         self.images: list[Image] = []
         self.batches: list[list[dict]] = []
         self.drift = 0  # extra units the "server" inserts, to force a mismatch
+        self._armed: dict[str, tuple[int, Exception]] = {}
+
+    # ---- making one call fail
+
+    def fail_once(self, name: str, *, after: int = 0, message: str = "the API refused") -> None:
+        """Arm one `GoogleApiError` from `name`, after `after` of its calls succeed.
+
+        Drive is the part of this that fails in practice — a quota, a revoked
+        scope, a permission that has already gone — and every defect below is
+        about what is left behind when it does. Failing the *second* of two
+        shares is the interesting case, which is why this counts rather than
+        simply raising on the next call.
+        """
+        self._armed[name] = (after, gdocs.GoogleApiError(f"{name}: {message}"))
+
+    def _check(self, name: str) -> None:
+        armed = self._armed.get(name)
+        if armed is None:
+            return
+        remaining, exc = armed
+        if remaining:
+            self._armed[name] = (remaining - 1, exc)
+            return
+        del self._armed[name]
+        raise exc
 
     # ---- the endpoints publish.py calls
 
@@ -95,7 +139,27 @@ class FakeDocs:
         elif "createParagraphBullets" in req:
             r = req["createParagraphBullets"]
             self._debullet(r["range"]["startIndex"], r["range"]["endIndex"])
+        elif "insertTable" in req:
+            self._insert_table(req["insertTable"])
         # updateTextStyle changes no characters, so the index space is unmoved.
+
+    def _insert_table(self, r: dict) -> None:
+        """Append a table at the end of the segment, the way the API documents it.
+
+        A newline goes in first — the API inserts one before a table added at the
+        end of a segment — then the table element, then for each row a row
+        element, and inside each row a cell element followed by the cell's own
+        empty paragraph. The body's existing final paragraph stays where it is
+        and becomes the paragraph after the table, because a body must end in one.
+        """
+        assert "endOfSegmentLocation" in r, "insertTable must target the end of the segment"
+        block: list = [NL, Marker("table")]
+        for _ in range(r["rows"]):
+            block.append(Marker("row"))
+            for _ in range(r["columns"]):
+                block.extend([Marker("cell"), NL])
+        at = len(self.units) - 1  # before the trailing empty paragraph's newline
+        self.units[at:at] = block
 
     def _paragraph_at(self, index: int) -> str:
         start = index
@@ -118,7 +182,13 @@ class FakeDocs:
 
     def _content(self):
         content, elements, pos = [], [], 0
-        for unit in self.units:
+        while pos < len(self.units):
+            unit = self.units[pos]
+            if isinstance(unit, Marker):
+                start = pos
+                pos, table = self._read_table(pos)
+                content.append({"startIndex": start, "endIndex": pos, "table": table})
+                continue
             pos += 1
             if isinstance(unit, Image):
                 elements.append({"inlineObjectElement": {"inlineObjectId": unit.oid}})
@@ -144,6 +214,49 @@ class FakeDocs:
             elements.append(unit)
         return content
 
+    def _read_table(self, pos: int):
+        """Read one table out of the unit stream, reporting the offsets Docs would.
+
+        The offset that matters is `content[0]["startIndex"]` of each cell: the
+        writer inserts the cell's text there, and it is one past the cell element
+        itself. Everything the writer does with a table is driven by these
+        numbers rather than predicted, so this is the part that has to be right.
+        """
+        assert self.units[pos].kind == "table"
+        pos += 1
+        rows = []
+        while pos < len(self.units) and isinstance(self.units[pos], Marker) \
+                and self.units[pos].kind == "row":
+            pos += 1
+            cells = []
+            while pos < len(self.units) and isinstance(self.units[pos], Marker) \
+                    and self.units[pos].kind == "cell":
+                cell_start = pos
+                pos += 1
+                para_start = pos
+                while pos < len(self.units) and self.units[pos] != NL:
+                    pos += 1
+                pos += 1  # the newline that ends the cell's paragraph
+                cells.append({
+                    "startIndex": cell_start,
+                    "endIndex": pos,
+                    "content": [{
+                        "startIndex": para_start,
+                        "endIndex": pos,
+                        "paragraph": {
+                            "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"},
+                            "elements": [{"textRun": {
+                                "content": to_text(self.units[para_start:pos])}}],
+                        },
+                    }],
+                })
+            rows.append({"tableCells": cells})
+        return pos, {
+            "rows": len(rows),
+            "columns": len(rows[0]["tableCells"]) if rows else 0,
+            "tableRows": rows,
+        }
+
     def _objects(self):
         host = "googleusercontent.com" if self.rehosted else "drive.google.com"
         return {
@@ -158,7 +271,7 @@ def docs(monkeypatch):
     """A FakeDocs wired into every `gdocs` call `publish.py` makes."""
     fake = FakeDocs()
     drive = {"uploads": [], "shared": [], "unshared": [], "trashed": [],
-             "deleted_tabs": [], "created": [], "renamed": []}
+             "deleted_tabs": [], "created": [], "renamed": [], "log": []}
     fake.drive = drive
 
     monkeypatch.setattr(gdocs, "get_tabs", fake.get_tabs)
@@ -182,20 +295,37 @@ def docs(monkeypatch):
         gdocs, "update_tab_title",
         lambda doc_id, tab_id, title, token: drive["renamed"].append((tab_id, title)) or {},
     )
-    monkeypatch.setattr(
-        gdocs, "upload_png",
-        lambda path, token: drive["uploads"].append(str(path))
-        or {"id": f"file{len(drive['uploads'])}", "name": "f.png"},
-    )
-    monkeypatch.setattr(
-        gdocs, "share_anyone",
-        lambda file_id, token: drive["shared"].append(file_id) or {"id": f"perm-{file_id}"},
-    )
-    monkeypatch.setattr(
-        gdocs, "unshare",
-        lambda file_id, perm, token: drive["unshared"].append((file_id, perm)),
-    )
-    monkeypatch.setattr(gdocs, "trash", lambda file_id, token: drive["trashed"].append(file_id) or {})
+    # Written out rather than as lambdas so each Drive call can be armed to fail,
+    # and so `drive["log"]` records the order across all four: unshare-before-trash
+    # is an ordering property, and two lists cannot express it.
+    def upload_png(path, token):
+        fake._check("upload_png")
+        drive["uploads"].append(str(path))
+        file_id = f"file{len(drive['uploads'])}"
+        drive["log"].append(("upload", file_id))
+        return {"id": file_id, "name": "f.png"}
+
+    def share_anyone(file_id, token):
+        fake._check("share_anyone")
+        drive["shared"].append(file_id)
+        drive["log"].append(("share", file_id))
+        return {"id": f"perm-{file_id}"}
+
+    def unshare(file_id, perm, token):
+        fake._check("unshare")
+        drive["unshared"].append((file_id, perm))
+        drive["log"].append(("unshare", file_id))
+
+    def trash(file_id, token):
+        fake._check("trash")
+        drive["trashed"].append(file_id)
+        drive["log"].append(("trash", file_id))
+        return {}
+
+    monkeypatch.setattr(gdocs, "upload_png", upload_png)
+    monkeypatch.setattr(gdocs, "share_anyone", share_anyone)
+    monkeypatch.setattr(gdocs, "unshare", unshare)
+    monkeypatch.setattr(gdocs, "trash", trash)
     return fake
 
 
@@ -226,9 +356,12 @@ def fake_pillow(monkeypatch, ratio=0.5):
 
     def shrink(figures, out_dir):
         out_dir.mkdir(parents=True, exist_ok=True)
-        for figure in figures:
-            (out_dir / figure.name).write_bytes(b"png")
-        return 0
+        shrunk = {}
+        for number, figure in enumerate(figures, start=1):
+            target = out_dir / f"figure-{number:02d}{figure.suffix or '.png'}"
+            target.write_bytes(b"png")
+            shrunk[figure] = target
+        return 0, shrunk
 
     monkeypatch.setattr(publish, "_pillow", lambda: (FakeImage, None))
     monkeypatch.setattr(publish, "shrink_figures", shrink)
@@ -371,7 +504,7 @@ def test_a_publish_with_no_figures_never_imports_pillow(tmp_path, monkeypatch, d
     source = md(tmp_path, "# Title\n\nA paragraph with **bold** in it.\n\n- one\n- two\n")
     out = []
     assert publish.publish_tab("doc1", source, "v1", "", "tok", out=out.append) == 0
-    assert publish.shrink_figures([], tmp_path / "out") == 0
+    assert publish.shrink_figures([], tmp_path / "out") == (0, {})
 
 
 # --- index arithmetic --------------------------------------------------------
@@ -395,6 +528,10 @@ def test_the_writer_predicts_the_end_of_body_exactly(tmp_path, docs):
         "2. second\n\n"
         "- a second list\n"
         "  - also nested\n\n"
+        "| model | score |\n"
+        "| --- | ---: |\n"
+        "| opus | 0.81 |\n"
+        "| **glm** | 0.62 |\n\n"
         "> a quotation\n"
     ))
     out = []
@@ -412,6 +549,15 @@ def test_the_writer_predicts_the_end_of_body_exactly(tmp_path, docs):
     # them, which is the shift the writer has to subtract from its prediction.
     assert "\t" not in text
     assert docs.styles["Title"] == "HEADING_1"
+    # A table costs indices for its own structure, not only for its text, and the
+    # writer reads those offsets back rather than predicting them — so the cell
+    # text has to arrive in the right cells for the sync after it to line up.
+    tables = [e for e in docs._content() if "table" in e]
+    assert len(tables) == 1 and tables[0]["table"]["rows"] == 3
+    assert tables[0]["table"]["columns"] == 2
+    filled = [to_text(docs.units[c["content"][0]["startIndex"]:c["content"][0]["endIndex"]])
+              for row in tables[0]["table"]["tableRows"] for c in row["tableCells"]]
+    assert filled == ["model\n", "score\n", "opus\n", "0.81\n", "glm\n", "0.62\n"]
     # The tab still ends in the empty paragraph every insertion goes before.
     assert text.endswith("\n\n")
 
@@ -516,6 +662,168 @@ def test_a_failed_render_trashes_the_temporary_copies_too(tmp_path, docs, monkey
     assert publish.publish_tab("doc1", source, "v1", "", "tok", out=lambda *_: None) == 3
     assert docs.drive["trashed"] == ["file1"]
     assert docs.drive["deleted_tabs"] == ["t.1"]
+
+
+def _two_figures(tmp_path):
+    (tmp_path / "figs").mkdir()
+    (tmp_path / "figs" / "a.png").write_bytes(b"png a")
+    (tmp_path / "figs" / "b.png").write_bytes(b"png b")
+    return md(tmp_path, "# Title\n\n![A](figs/a.png)\n\n![B](figs/b.png)\n")
+
+
+def test_an_upload_that_fails_halfway_takes_back_the_copies_already_made(
+        tmp_path, docs, monkeypatch):
+    """The upload loop used to sit outside the rollback envelope.
+
+    Every copy made before the failure stayed on the account, shared with anyone
+    holding the link, and nothing ever went back for it: the caller deleted the
+    tab and considered the wreckage cleared.
+    """
+    fake_pillow(monkeypatch)
+    docs.fail_once("share_anyone", after=1)  # the second figure's share
+    source = _two_figures(tmp_path)
+    assert publish.publish_tab("doc1", source, "v1", "", "tok", out=lambda *_: None) == 3
+    # The first was shared, so it is unshared and trashed; the second got as far
+    # as Drive before the share failed, so it is trashed too rather than orphaned.
+    assert docs.drive["unshared"] == [("file1", "perm-file1")]
+    assert docs.drive["trashed"] == ["file1", "file2"]
+    assert docs.drive["deleted_tabs"] == ["t.1"]
+
+
+def test_cleanup_revokes_the_link_before_it_trashes_the_copy(tmp_path, docs, monkeypatch):
+    """Trashing alone is not revoking.
+
+    A file in the Drive trash is still served to anyone who has its link until it
+    is purged, so a cleanup that only trashed left every figure of every failed
+    publish world-readable — the state the sharing dance exists to end.
+    """
+    fake_pillow(monkeypatch)
+    docs.drift = 1
+    source = _figured(tmp_path)
+    assert publish.publish_tab("doc1", source, "v1", "", "tok", out=lambda *_: None) == 3
+    assert docs.drive["log"] == [
+        ("upload", "file1"), ("share", "file1"), ("unshare", "file1"), ("trash", "file1"),
+    ]
+
+
+def test_a_remote_figure_is_handed_to_docs_as_its_own_url(tmp_path, docs, monkeypatch):
+    """`figure_paths` skips remote images; the renderer used to not.
+
+    It rebuilt a local path from the URL's last segment, uploaded whatever
+    happened to be sitting there under that name, and shared it — which for a
+    URL ending in a name the drafts also use locally published the wrong figure.
+    """
+    fake_pillow(monkeypatch)
+    (tmp_path / "figs").mkdir()
+    (tmp_path / "figs" / "chart.png").write_bytes(b"png")
+    source = md(tmp_path, (
+        "# Title\n\n"
+        "![Remote](https://example.org/figs/chart.png)\n\n"
+        "![Local](figs/chart.png)\n"
+    ))
+    assert publish.publish_tab("doc1", source, "v1", "", "tok", out=lambda *_: None) == 0
+    assert len(docs.drive["uploads"]) == 1 and docs.drive["shared"] == ["file1"]
+    inserts = [r["insertInlineImage"] for batch in docs.batches for r in batch
+               if "insertInlineImage" in r]
+    assert inserts[0]["uri"] == "https://example.org/figs/chart.png"
+    # No height: the file is not here to measure, so Docs keeps its own ratio.
+    assert "height" not in inserts[0]["objectSize"]
+    assert inserts[1]["uri"] == "https://drive.google.com/uc?export=view&id=file1"
+    assert "height" in inserts[1]["objectSize"]
+    # One upload, so one release. The remote figure has nothing to release.
+    assert docs.drive["trashed"] == ["file1"]
+
+
+def test_a_cleanup_failure_after_verification_leaves_the_document_alone(
+        tmp_path, docs, monkeypatch, capsys):
+    """The publish worked. Failing to tidy up afterwards must not undo it.
+
+    The release of the temporary uploads used to run inside the render's own
+    try, so a Drive error while revoking a permission reached `publish_doc` as a
+    `RenderError` and trashed a document that had already verified — losing the
+    whole render to a housekeeping failure.
+    """
+    fake_pillow(monkeypatch)
+    docs.fail_once("unshare")
+    source = _figured(tmp_path)
+    out = []
+    assert publish.publish_doc("A draft", source, "v1", "", "tok", out=out.append) == 0
+    assert docs.drive["trashed"] == []  # neither the copy nor, crucially, the document
+    err = capsys.readouterr().err
+    assert "LEFT IN PLACE as file1" in err
+    assert any("https://docs.google.com/document/d/doc1/edit" == line for line in out)
+
+
+def test_two_figures_with_the_same_basename_stay_two_figures(tmp_path, docs, monkeypatch):
+    """Shrunk copies used to be named by basename, so one overwrote the other.
+
+    `a/chart.png` and `b/chart.png` both landed on `figures/chart.png`, and the
+    tab showed the second figure twice — a wrong document that verified, because
+    the counts still matched.
+    """
+    pytest.importorskip("PIL")
+    from PIL import Image as PILImage
+
+    for name, colour in (("a", (255, 0, 0)), ("b", (0, 0, 255))):
+        (tmp_path / name).mkdir()
+        PILImage.new("RGB", (8, 8), colour).save(tmp_path / name / "chart.png")
+    source = md(tmp_path, "# Title\n\n![A](a/chart.png)\n\n![B](b/chart.png)\n")
+
+    uploaded = []
+    inner = gdocs.upload_png
+
+    def record(path, token):
+        uploaded.append(Path(path).read_bytes())
+        return inner(path, token)
+
+    monkeypatch.setattr(gdocs, "upload_png", record)
+    assert publish.publish_tab("doc1", source, "v1", "", "tok", out=lambda *_: None) == 0
+    assert len(docs.drive["uploads"]) == 2
+    assert len(set(docs.drive["uploads"])) == 2   # two distinct files on disk
+    assert uploaded[0] != uploaded[1]             # carrying two distinct figures
+
+
+def test_publish_doc_trashes_the_new_document_when_the_tab_lookup_fails(
+        tmp_path, docs, monkeypatch, capsys):
+    """`_default_tab` used to run before the cleanup block.
+
+    Its fallback is a network fetch like any other, and when it failed the
+    document created one line earlier was left on the account — by the very
+    function whose contract is that a failed publish leaves nothing behind.
+    """
+    monkeypatch.setattr(gdocs, "create_document", lambda title, token: {"documentId": "doc1"})
+
+    def refuse(doc_id, token):
+        raise gdocs.GoogleApiError("GET /v1/documents/doc1: [Errno -2] Name or service not known")
+
+    monkeypatch.setattr(gdocs, "get_tabs", refuse)
+    source = md(tmp_path, "# Title\n")
+    assert publish.publish_doc("A draft", source, "v1", "", "tok", out=lambda *_: None) == 3
+    assert docs.drive["trashed"] == ["doc1"]
+    err = capsys.readouterr().err
+    assert "Name or service not known" in err and "trashing the new document doc1" in err
+
+
+def test_the_shrunk_figures_are_deleted_when_the_command_returns(
+        tmp_path, docs, monkeypatch):
+    """One directory per publish, in the system temp, that nothing ever removed.
+
+    Every draft's figures accumulated there for the life of the machine, at full
+    shrunk size, which for a report of a dozen plots is not a rounding error.
+    """
+    import tempfile as tempfile_mod
+
+    fake_pillow(monkeypatch)
+    made = []
+    real = tempfile_mod.mkdtemp
+    monkeypatch.setattr(
+        tempfile_mod, "mkdtemp",
+        lambda *a, **k: made.append(real(*a, **k)) or made[-1],
+    )
+    source = _figured(tmp_path)
+    assert publish.publish_tab("doc1", source, "v1", "", "tok", out=lambda *_: None) == 0
+    assert len(made) == 1
+    assert not Path(made[0]).exists()
 
 
 # --- the command line --------------------------------------------------------
@@ -679,3 +987,65 @@ def test_publish_doc_trashes_the_new_document_when_the_rename_is_refused(tmp_pat
     assert publish.publish_doc("A draft", source, "v1", "", "tok", out=lambda *_: None) == 3
     assert "doc1" in docs.drive["trashed"]
     assert "Unknown name" in capsys.readouterr().err
+
+
+def test_a_connection_that_never_reached_google_still_names_the_call(monkeypatch):
+    """A failure below HTTP has no status and no JSON body.
+
+    Only `HTTPError` was wrapped, so a DNS failure or a refused connection
+    escaped as a bare `URLError` naming a socket and no call — and, worse, slid
+    past every `except GoogleApiError` that exists to undo a half-made publish.
+    """
+    import urllib.error
+    import urllib.request
+
+    def refuse(req, timeout):
+        raise urllib.error.URLError("[Errno -2] Name or service not known")
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with pytest.raises(gdocs.GoogleApiError) as e:
+        gdocs.batch_update("doc1", [{"x": {}}], "tok")
+    assert "POST /v1/documents/doc1:batchUpdate" in str(e.value)
+    assert "Name or service not known" in str(e.value)
+
+
+def test_the_upload_path_wraps_the_same_failure(tmp_path, monkeypatch):
+    """`_call_bytes` is a second copy of the same three lines, and had the same gap."""
+    import urllib.error
+    import urllib.request
+
+    def refuse(req, timeout):
+        raise urllib.error.URLError("[Errno 111] Connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    figure = tmp_path / "a.png"
+    figure.write_bytes(b"png")
+    with pytest.raises(gdocs.GoogleApiError) as e:
+        gdocs.upload_png(figure, "tok")
+    assert "POST /upload/drive/v3/files" in str(e.value)
+    assert "Connection refused" in str(e.value)
+
+
+def test_a_malformed_body_is_not_dressed_up_as_a_google_error(monkeypatch):
+    """Only transport failures are wrapped.
+
+    A body that is not JSON means this code is talking to something that is not
+    the Docs API — a captive portal, a proxy's error page — and reporting that as
+    a `GoogleApiError` would send the reader looking for a Google-side cause.
+    """
+    import json
+    import urllib.request
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"<html>proxy error</html>"
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: Response())
+    with pytest.raises(json.JSONDecodeError):
+        gdocs.batch_update("doc1", [{"x": {}}], "tok")

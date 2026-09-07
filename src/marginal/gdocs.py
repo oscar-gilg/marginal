@@ -91,6 +91,8 @@ def _call(url: str, token: str, method: str = "GET", body: dict | None = None) -
             raw = r.read()
     except urllib.error.HTTPError as e:
         raise GoogleApiError(_describe(e, method, url)) from None
+    except urllib.error.URLError as e:
+        raise GoogleApiError(_describe_url_error(e, method, url)) from None
     return json.loads(raw) if raw else {}
 
 
@@ -114,6 +116,19 @@ def _describe(e: "urllib.error.HTTPError", method: str, url: str) -> str:
     return f"HTTP {e.code} from {method} {path}: {why}"
 
 
+def _describe_url_error(e: "urllib.error.URLError", method: str, url: str) -> str:
+    """The same one line for a failure that never reached an HTTP status.
+
+    DNS that does not resolve, a refused connection, an expired certificate: the
+    request died below the API, so there is no code and no JSON body. Left
+    unwrapped these escaped as a bare `URLError` naming only the socket, which
+    told the caller nothing about which of a render's dozens of calls had died —
+    and callers that catch `GoogleApiError` to undo their own work never saw it.
+    """
+    path = urllib.parse.urlsplit(url).path
+    return f"{method} {path}: {e.reason}"
+
+
 def _call_bytes(
     url: str, token: str, *, method: str = "POST", body: bytes, content_type: str
 ) -> dict:
@@ -133,6 +148,8 @@ def _call_bytes(
             raw = r.read()
     except urllib.error.HTTPError as e:
         raise GoogleApiError(_describe(e, method, url)) from None
+    except urllib.error.URLError as e:
+        raise GoogleApiError(_describe_url_error(e, method, url)) from None
     return json.loads(raw) if raw else {}
 
 

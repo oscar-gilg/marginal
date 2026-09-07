@@ -1,7 +1,7 @@
 {
   "name": "marginal",
-  "version": "0.4.2",
-  "description": "Review a Google Doc and leave native anchored comments and suggested edits in it",
+  "version": "0.5.0",
+  "description": "Review a Google Doc and leave native anchored comments and suggested edits in it, or publish a Markdown draft into one for comments",
   "author": {
     "name": "Oscar Gilg",
     "url": "https://github.com/oscar-gilg"

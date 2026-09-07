@@ -21,6 +21,10 @@
     marginal reply   <doc> -c ID -b BODY     reply in a thread (no browser)
     marginal unpost  <doc> -c ID [-c ID]     delete comments we created
 
+  The other direction — write the document rather than read it:
+    marginal publish <md> --doc <doc> --tab-title "v2 — 07-09"
+    marginal publish <md> --title "New draft"
+
 Every command that takes part in writing a comment takes the same flags, because
 each one is a setting both modes read from the same config. A flag that shaped an
 API-mode run and had no equivalent on the agent-mode command was a difference
@@ -42,6 +46,7 @@ from . import setup as setup_mod
 from .cdp import launch_chrome, wait_for_port
 from .docs_ui import open_doc
 from .post import post_many, unpost
+from .publish import PublishError, default_tab_title, publish_doc, publish_tab
 from .run import _pick_tab as pick_tab
 from .run import context, post_batch, respond, review, submit_brief
 
@@ -381,6 +386,12 @@ def _parser() -> argparse.ArgumentParser:
                 help="also read emoji reactions, which need the browser",
             )
             p.add_argument("--port", type=int)
+            p.add_argument(
+                "--full",
+                action="store_true",
+                help="print every thread whole: the full anchor, the full comment "
+                "and every reply, rather than the one-line summary",
+            )
 
     p = sub.add_parser("comment", help="leave comments; `mode` says who writes them")
     _commenting(p)
@@ -427,6 +438,25 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("doc")
     p.add_argument("-c", "--comment-id", action="append", required=True)
     p.add_argument("--force", action="store_true", help="also delete ids absent from the ledger")
+
+    # The positional is `markdown`, not `source`: `source` is a config setting
+    # (api | browser), and `_dispatch` derives its overrides from the field names,
+    # so a positional called `source` would quietly set it to a Path.
+    p = sub.add_parser("publish", help="render a markdown file into a Google Doc tab")
+    p.add_argument("markdown", type=Path, help="the markdown file to render")
+    where = p.add_mutually_exclusive_group(required=True)
+    where.add_argument(
+        "--doc",
+        help="an existing Doc, by URL or id: the markdown becomes a new tab in it, "
+        "leaving every earlier version and its comments where they are",
+    )
+    where.add_argument("--title", help="instead, create a new Doc with this title")
+    p.add_argument(
+        "--tab-title",
+        help=f"name of the tab. Required with --doc; with --title it defaults to "
+        f"{default_tab_title()!r}",
+    )
+    p.add_argument("--note", default="", help="italic note under the first heading")
 
     return ap
 
@@ -493,6 +523,32 @@ def _dispatch(a) -> int:
             print("Sign in to Google in this window once; the session persists.")
         return 0
 
+    # Also before the document is parsed, and for the same reason `setup` is:
+    # `publish --title` has no document at all yet — it is about to create one —
+    # so it mints its own token rather than falling through to the shared step
+    # below, which starts by insisting on a document id.
+    if a.cmd == "publish":
+        try:
+            token = gdocs.access_token(cfg.credentials, account=cfg.account)
+        except (FileNotFoundError, auth.AuthError) as e:
+            sys.exit(f"marginal: {e}")
+        try:
+            if a.doc:
+                if not a.tab_title:
+                    sys.exit("marginal: --tab-title is required with --doc")
+                return publish_tab(
+                    gdocs.doc_id_from_url(a.doc), a.markdown, a.tab_title, a.note, token
+                )
+            return publish_doc(
+                a.title, a.markdown, a.tab_title or default_tab_title(), a.note, token
+            )
+        except ValueError as e:
+            sys.exit(f"marginal: {e}")
+        except PublishError as e:
+            # A missing figure, a markdown file that is not there, a Pillow that
+            # is not installed. Each one is a line telling the user what to fix.
+            sys.exit(f"marginal: {e}")
+
     try:
         doc_id = gdocs.doc_id_from_url(a.doc)
     except ValueError as e:
@@ -544,7 +600,9 @@ def _dispatch(a) -> int:
     # did not, even though it reads through the browser and verifies through
     # `browser_reader` exactly as agent mode does. The commands below reach Drive
     # whatever the source: they read the comment list, or write to it.
-    reads_drive = a.cmd in ("read", "list", "reply", "unpost", "respond", "post")
+    # `publish` is in the list because it does reach Drive, and this list is the
+    # answer to "which commands do"; it returns above before ever getting here.
+    reads_drive = a.cmd in ("read", "list", "reply", "unpost", "respond", "post", "publish")
     reads_drive = reads_drive or cfg.source != "browser"
     try:
         token = (
@@ -582,6 +640,39 @@ def _dispatch(a) -> int:
                 unmatched = reactions.attach(comments, reactions.from_export(page, doc_id))
             finally:
                 page.close()
+        if a.full:
+            # The default listing is a scan: one line each, so a long thread does
+            # not push the next one off the screen. `--full` is for the other
+            # question — what did they actually say — where a truncated comment is
+            # exactly the part that mattered, and re-reading it in the browser is
+            # the thing this command exists to avoid.
+            open_count = sum(1 for c in comments if not c.get("resolved"))
+            print(f"{len(comments)} thread(s), {open_count} open\n")
+            for i, c in enumerate(comments, 1):
+                state = "RESOLVED" if c.get("resolved") else "open"
+                who = (c.get("author") or {}).get("displayName", "?")
+                print(f"[{i}] {state}  {who}  {c.get('createdTime', '')}  "
+                      f"id={c['id']}{_reacts(c)}")
+                quoted = (c.get("quotedFileContent") or {}).get("value")
+                if quoted:
+                    # Whitespace collapsed, nothing dropped: an anchor spanning a
+                    # paragraph break is one quotation, not two lines of output.
+                    print(f"    on: {' '.join(quoted.split())}")
+                for line in (c.get("content") or "").splitlines() or [""]:
+                    print(f"    {line}")
+                for r in c.get("replies", []):
+                    rwho = (r.get("author") or {}).get("displayName", "?")
+                    # `action` is how Drive reports a resolve or a reopen, which
+                    # arrive as replies with no content of their own.
+                    action = f" ({r['action']})" if r.get("action") else ""
+                    stamp = r.get("createdTime", "")
+                    body = " ".join((r.get("content") or "").split())
+                    print(f"    -> {rwho}{action}  {stamp}: {body}{_reacts(r)}")
+                print()
+            for text in unmatched:
+                print(f"! reaction on an unmatched card: {text!r}")
+            return 0
+
         for c in comments:
             mark = "✓" if c.get("resolved") else " "
             quoted = (c.get("quotedFileContent") or {}).get("value", "")

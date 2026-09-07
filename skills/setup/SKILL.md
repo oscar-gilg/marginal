@@ -72,9 +72,15 @@ Report, in a couple of lines:
   pass and the option of API mode (`marginal review`), and without one the
   shortening pass is off, so comments post at whatever length they were written;
 - whether Google OAuth was found. Without it the document is read through the
-  browser session, and `list`, `reply`, `respond` and `unpost` are unavailable.
+  browser session, and `list`, `reply`, `respond`, `unpost` and `publish` are
+  unavailable.
   Adding it is one command: `marginal auth --account you@example.com`;
-- that `/marginal:review <doc-url>` is the next thing to run.
+- that `/marginal:review <doc-url>` is the next thing to run — or
+  `/marginal:publish draft.md "title"` if what they have is a Markdown draft to
+  put up for comments;
+- if the setup output reports Pillow missing and they will publish drafts with
+  figures, the install line it printed (`marginal[publish]`). Drafts without
+  figures do not need it, so do not present it as a problem otherwise.
 
 Do not present the missing key or the missing OAuth client as problems to fix.
 Both are supported paths, and the credential-free one is the reason this tool has
@@ -83,8 +89,9 @@ a browser source at all. Mention what each would buy, once, and leave it.
 ## 5. OAuth, if they need it
 
 **Check whether they need it at all first.** Commenting on a document works without
-any Google credentials. OAuth buys four commands — `list`, `reply`, `respond`,
-`unpost` — which means answering replies and removing comments. Someone who only
+any Google credentials. OAuth buys five commands — `list`, `reply`, `respond`,
+`unpost`, `publish` — which means answering replies, removing comments, and
+putting a Markdown draft into a Doc for comments (`/marginal:publish`). Someone who only
 wants to leave comments should not be walked through this.
 
 `marginal config` says under `# oauth client` whether one is already installed. If

@@ -7,7 +7,7 @@
     {
       "name": "marginal",
       "source": "./",
-      "description": "Read a Google Doc, leave real anchored comments in it, and answer the replies"
+      "description": "Read a Google Doc, leave real anchored comments in it, answer the replies, and publish Markdown drafts into it for comments"
     }
   ]
 }

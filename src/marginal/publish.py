@@ -54,6 +54,7 @@ import re
 import shutil
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import gdocs
@@ -64,6 +65,8 @@ INLINE_RE = re.compile(r"(\*\*.+?\*\*|\*.+?\*|`[^`]+`)")
 LINK_RE = re.compile(r"(?<!!)\[([^\]]+)\]\((https?://[^)\s]+)\)")
 BULLET_RE = re.compile(r"^(\s*)- (.*)$")
 NUMBER_RE = re.compile(r"^(\d+)\. (.*)$")
+# What opens a block of its own, and therefore ends the one being read.
+BLOCK_START_RE = re.compile(r"(#|---|>|\||!\[|- |\d+\. )")
 
 MAX_FIGURE_WIDTH = 1100
 QUANTIZE_COLORS = 128
@@ -119,8 +122,8 @@ def repo_root(source: Path) -> Path:
     return here
 
 
-def figure_targets(source: Path) -> dict[str, Path]:
-    """Every local figure reference, keyed by the target exactly as written.
+def figure_targets(blocks: list[dict], source: Path) -> dict[str, Path]:
+    """Every local figure the blocks reference, keyed by the target as written.
 
     Relative paths resolve against the markdown file's own directory first and
     the enclosing repository root second. That order is the general one: a
@@ -132,11 +135,19 @@ def figure_targets(source: Path) -> dict[str, Path]:
     string is what the renderer later has to find a shrunk copy by. Resolving it
     a second time at render time, from the basename, is how `a/chart.png` and
     `b/chart.png` became one figure repeated twice in the tab.
+
+    Takes the parsed blocks rather than re-reading the file, so the figures that
+    are uploaded are the ones the renderer will ask for: the parser decides what
+    counts as an image line, and a second regex pass over the same text was a
+    second opinion nothing kept in step.
     """
     root = repo_root(source)
     found: dict[str, Path] = {}
-    for _, target in IMAGE_RE.findall(source.read_text()):
-        if target.startswith(("http://", "https://")) or target in found:
+    for block in blocks:
+        if block["kind"] != "image" or block["remote"]:
+            continue
+        target = block["path"]
+        if target in found:
             continue
         if Path(target).is_absolute():
             candidate = Path(target)
@@ -153,11 +164,6 @@ def figure_targets(source: Path) -> dict[str, Path]:
     return found
 
 
-def figure_paths(source: Path) -> list[Path]:
-    """Every distinct local figure file the markdown references, in order."""
-    return list(dict.fromkeys(figure_targets(source).values()))
-
-
 def _pillow():
     """Import Pillow, or explain how to get it. Never called without a figure."""
     try:
@@ -167,30 +173,43 @@ def _pillow():
     return Image, ImageOps
 
 
-def shrink_figures(figures: list[Path], out_dir: Path) -> tuple[int, dict[Path, Path]]:
+@dataclass(frozen=True)
+class Figure:
+    """A shrunk copy of one figure, and the pixel size it was written at.
+
+    The dimensions travel with the copy because the renderer needs the aspect
+    ratio to state a height, and reading it back off disk meant a second Pillow
+    entry point — one that a publish whose figures had already been measured
+    opened again for every image.
+    """
+
+    path: Path
+    width: int
+    height: int
+
+
+def shrink_figures(figures: list[Path], out_dir: Path) -> dict[Path, Figure]:
     """Downscale, frame and quantize each figure into `out_dir`.
 
-    Returns the total bytes written and a {source file: shrunk copy} mapping.
-    The copies are named by their position in the list rather than by their
-    original basename: two figures called `chart.png`, in different directories,
-    both used to be written to `out_dir/chart.png`, so the second silently
-    overwrote the first and the finished tab showed one of them twice. The
-    mapping is returned rather than reconstructed later for the same reason —
-    a basename is not an identity.
+    Returns a {source file: shrunk copy} mapping. The copies are named by their
+    position in the list rather than by their original basename: two figures
+    called `chart.png`, in different directories, both used to be written to
+    `out_dir/chart.png`, so the second silently overwrote the first and the
+    finished tab showed one of them twice. The mapping is returned rather than
+    reconstructed later for the same reason — a basename is not an identity.
 
     Returns before touching Pillow when there is nothing to shrink, which is what
     makes the dependency genuinely optional rather than optional-until-you-run-it.
     """
     if not figures:
-        return 0, {}
+        return {}
     Image, ImageOps = _pillow()
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    total = 0
     # The frame is added to the pixels, so the resize aims at the inner box and
     # the framed figure still lands on MAX_FIGURE_WIDTH.
     inner_width = MAX_FIGURE_WIDTH - 2 * FIGURE_BORDER_PX
-    shrunk: dict[Path, Path] = {}
+    shrunk: dict[Path, Figure] = {}
     for number, figure in enumerate(figures, start=1):
         image = Image.open(figure)
         if image.mode not in ("RGB", "L"):
@@ -203,9 +222,8 @@ def shrink_figures(figures: list[Path], out_dir: Path) -> tuple[int, dict[Path, 
         image = image.quantize(colors=QUANTIZE_COLORS)
         target = out_dir / f"figure-{number:02d}{figure.suffix or '.png'}"
         image.save(target, optimize=True)
-        total += target.stat().st_size
-        shrunk[figure] = target
-    return total, shrunk
+        shrunk[figure] = Figure(target, image.width, image.height)
+    return shrunk
 
 
 # --- markdown ----------------------------------------------------------------
@@ -260,6 +278,18 @@ def inline_spans(text: str) -> tuple[str, list[tuple[int, int, object]]]:
     return plain, spans
 
 
+def _starts_block(line: str) -> bool:
+    """Whether `line` opens a block, and so ends whichever block is being read.
+
+    One predicate for all three continuation loops. They were three hand-written
+    lists of what interrupts a paragraph, a bullet or a numbered item, and they
+    disagreed: a blockquote ended a paragraph but was swallowed into a bullet, a
+    horizontal rule ended a bullet but not a numbered item. Which markers exist
+    is one fact about the dialect, not three.
+    """
+    return bool(BLOCK_START_RE.match(line.strip()))
+
+
 def parse_markdown(source: Path, note: str = "") -> list[dict]:
     """Parse the markdown subset drafts use into a flat list of blocks.
 
@@ -275,14 +305,22 @@ def parse_markdown(source: Path, note: str = "") -> list[dict]:
     lines = source.read_text().splitlines()
     blocks: list[dict] = []
     index = 0
-    first_h1 = True
     while index < len(lines):
         line = lines[index]
         stripped = line.strip()
 
         image = IMAGE_RE.fullmatch(stripped)
         if image:
-            blocks.append({"kind": "image", "alt": image.group(1), "path": image.group(2)})
+            target = image.group(2)
+            # Decided once, here, so nothing downstream re-derives it from the
+            # string: a figure Docs fetches itself is never uploaded, never
+            # shrunk, and never measured.
+            blocks.append({
+                "kind": "image",
+                "alt": image.group(1),
+                "path": target,
+                "remote": target.startswith(("http://", "https://")),
+            })
             index += 1
             continue
 
@@ -290,10 +328,13 @@ def parse_markdown(source: Path, note: str = "") -> list[dict]:
         if heading:
             level = len(heading.group(1))
             blocks.append({"kind": "heading", "level": level, "text": heading.group(2).strip()})
-            if level == 1 and first_h1 and note:
+            # Under the first level-one heading and no other: a version marker
+            # repeated at every H1 is noise rather than a marker. Consumed rather
+            # than flagged, so "have we passed the first H1" is not a second fact
+            # to keep in step with it.
+            if level == 1 and note:
                 blocks.append({"kind": "note", "text": note})
-            if level == 1:
-                first_h1 = False
+                note = ""
             index += 1
             continue
 
@@ -333,10 +374,9 @@ def parse_markdown(source: Path, note: str = "") -> list[dict]:
             index += 1
             while index < len(lines):
                 nxt = lines[index]
-                if (nxt.strip() and not NUMBER_RE.match(nxt)
-                        and not nxt.startswith(("#", ">", "|"))
-                        and not nxt.strip().startswith(("![", "- "))
-                        and nxt.startswith("   ")):
+                # Indented as well as uninterrupted: an unindented line after a
+                # numbered item is the next paragraph, not its continuation.
+                if nxt.strip() and not _starts_block(nxt) and nxt.startswith("   "):
                     content.append(nxt.strip())
                     index += 1
                 else:
@@ -350,9 +390,7 @@ def parse_markdown(source: Path, note: str = "") -> list[dict]:
             index += 1
             while index < len(lines):
                 nxt = lines[index]
-                if (nxt.strip() and not BULLET_RE.match(nxt)
-                        and not nxt.startswith("#") and nxt.strip() != "---"
-                        and not nxt.strip().startswith("![")
+                if (nxt.strip() and not _starts_block(nxt)
                         and (len(nxt) - len(nxt.lstrip())) > indent):
                     content.append(nxt.strip())
                     index += 1
@@ -364,9 +402,8 @@ def parse_markdown(source: Path, note: str = "") -> list[dict]:
         if stripped:
             content = [stripped]
             index += 1
-            while index < len(lines) and lines[index].strip() and not re.match(
-                r"^(\s*- |#|---|!\[|>|\||\d+\. )", lines[index].strip()
-            ) and not lines[index].startswith("#"):
+            while (index < len(lines) and lines[index].strip()
+                   and not _starts_block(lines[index])):
                 content.append(lines[index].strip())
                 index += 1
             blocks.append({"kind": "para", "text": " ".join(content)})
@@ -379,18 +416,24 @@ def parse_markdown(source: Path, note: str = "") -> list[dict]:
 # --- reading a tab back ------------------------------------------------------
 
 
-def tab_body(doc: dict, tab_id: str) -> list[dict]:
+def _find_tab(doc: dict, tab_id: str) -> dict:
+    """The tab of `doc` with this id, or `RenderError` naming the one asked for.
+
+    Every reader of a rendered tab goes through here. The image reader used to
+    answer "no images" when it could not find the tab at all, which is what a tab
+    of pure text looks like too — so a render written into a tab nobody could
+    find afterwards released its temporary Drive copies as if Docs had re-hosted
+    them, and the finished document showed dead figures.
+    """
     for tab, _ in gdocs.walk_tabs(doc.get("tabs") or []):
         if (tab.get("tabProperties") or {}).get("tabId") == tab_id:
-            return ((tab.get("documentTab") or {}).get("body") or {}).get("content") or []
+            return tab
     raise RenderError(f"tab {tab_id} not found in document")
 
 
-def body_end(doc: dict, tab_id: str) -> int:
-    content = tab_body(doc, tab_id)
-    if not content:
-        raise RenderError(f"tab {tab_id} has an empty body")
-    return content[-1]["endIndex"]
+def tab_body(doc: dict, tab_id: str) -> list[dict]:
+    tab = _find_tab(doc, tab_id)
+    return ((tab.get("documentTab") or {}).get("body") or {}).get("content") or []
 
 
 def tab_stats(doc: dict, tab_id: str) -> dict:
@@ -428,16 +471,13 @@ def tab_stats(doc: dict, tab_id: str) -> dict:
 
 def image_content_uris(doc: dict, tab_id: str) -> list[str]:
     """Where each inline image in the tab is served from, as Docs reports it."""
-    for tab, _ in gdocs.walk_tabs(doc.get("tabs") or []):
-        if (tab.get("tabProperties") or {}).get("tabId") == tab_id:
-            objects = (tab.get("documentTab") or {}).get("inlineObjects") or {}
-            return [
-                ((obj.get("inlineObjectProperties") or {}).get("embeddedObject") or {})
-                .get("imageProperties", {})
-                .get("contentUri", "")
-                for obj in objects.values()
-            ]
-    return []
+    objects = (_find_tab(doc, tab_id).get("documentTab") or {}).get("inlineObjects") or {}
+    return [
+        ((obj.get("inlineObjectProperties") or {}).get("embeddedObject") or {})
+        .get("imageProperties", {})
+        .get("contentUri", "")
+        for obj in objects.values()
+    ]
 
 
 # --- the writer --------------------------------------------------------------
@@ -457,6 +497,9 @@ class TabWriter:
         self.doc_id = doc_id
         self.tab_id = tab_id
         self.token = token
+        # The last `documents.get` answer, kept so a caller that needs to read
+        # the finished tab can use the fetch `sync` has already paid for.
+        self.doc: dict = {}
         self.reqs: list[dict] = []
         self.bullets: list[dict] = []
         self.removals = 0  # leading tabs createParagraphBullets will delete
@@ -472,8 +515,12 @@ class TabWriter:
         return {"startIndex": start, "endIndex": end, "tabId": self.tab_id}
 
     def sync(self) -> int:
-        doc = gdocs.get_tabs(self.doc_id, self.token)
-        self.pos = body_end(doc, self.tab_id) - 1
+        """Re-read the tab and put `self.pos` back on the final empty paragraph."""
+        self.doc = gdocs.get_tabs(self.doc_id, self.token)
+        content = tab_body(self.doc, self.tab_id)
+        if not content:
+            raise RenderError(f"tab {self.tab_id} has an empty body")
+        self.pos = content[-1]["endIndex"] - 1
         return self.pos
 
     def flush(self) -> None:
@@ -491,7 +538,44 @@ class TabWriter:
                 f"index drift after batch: expected end-of-body {expected}, server says {actual}"
             )
 
-    def style_spans(self, start: int, spans, offset: int = 0) -> None:
+    def _para_style(self, start: int, end: int, named: str = "NORMAL_TEXT",
+                    indent_pt: float = 0.0) -> dict:
+        """The paragraph styling every block sets: its named style and its indent."""
+        return {
+            "updateParagraphStyle": {
+                "range": self.rng(start, end),
+                "paragraphStyle": {
+                    "namedStyleType": named,
+                    "indentStart": {"magnitude": indent_pt, "unit": "PT"},
+                    "indentFirstLine": {"magnitude": indent_pt, "unit": "PT"},
+                },
+                "fields": "namedStyleType,indentStart,indentFirstLine",
+            }
+        }
+
+    def _reset(self, start: int, end: int) -> dict:
+        """Clear inherited text styling over a range.
+
+        `insertText` takes the styling of the text it is inserted next to, so
+        every paragraph and every table cell starts by clearing the fields inline
+        styling is about to set. Skipped, a paragraph after a bold one is bold.
+        """
+        return {
+            "updateTextStyle": {
+                "range": self.rng(start, end),
+                "textStyle": {},
+                "fields": RESET_TEXT_FIELDS,
+            }
+        }
+
+    def style_spans(self, start: int, spans, offset: int = 0) -> list[dict]:
+        """The requests that apply one paragraph's inline styles. Queues nothing.
+
+        Returned rather than appended so a caller that is not building
+        `self.reqs` — the table, whose requests are sent by hand — can use it
+        without swapping the queue out and back around the call.
+        """
+        out: list[dict] = []
         for span_start, span_end, style in spans:
             begin = start + offset + span_start
             end = start + offset + span_end
@@ -515,13 +599,14 @@ class TabWriter:
                     "fontSize": {"magnitude": 10, "unit": "PT"},
                 }
                 fields = "weightedFontFamily,fontSize"
-            self.reqs.append({
+            out.append({
                 "updateTextStyle": {
                     "range": self.rng(begin, end),
                     "textStyle": text_style,
                     "fields": fields,
                 }
             })
+        return out
 
     def paragraph(self, text: str, *, named: str = "NORMAL_TEXT", spans=(), tabs: int = 0,
                   indent_pt: float = 0.0, text_style: dict | None = None,
@@ -531,25 +616,9 @@ class TabWriter:
         start = self.pos
         length = u16(body)
         self.reqs.append({"insertText": {"location": self.loc(start), "text": body + "\n"}})
-        self.reqs.append({
-            "updateParagraphStyle": {
-                "range": self.rng(start, start + length + 1),
-                "paragraphStyle": {
-                    "namedStyleType": named,
-                    "indentStart": {"magnitude": indent_pt, "unit": "PT"},
-                    "indentFirstLine": {"magnitude": indent_pt, "unit": "PT"},
-                },
-                "fields": "namedStyleType,indentStart,indentFirstLine",
-            }
-        })
+        self.reqs.append(self._para_style(start, start + length + 1, named, indent_pt))
         if length:
-            self.reqs.append({
-                "updateTextStyle": {
-                    "range": self.rng(start, start + length),
-                    "textStyle": {},
-                    "fields": RESET_TEXT_FIELDS,
-                }
-            })
+            self.reqs.append(self._reset(start, start + length))
             if text_style:
                 self.reqs.append({
                     "updateTextStyle": {
@@ -558,7 +627,7 @@ class TabWriter:
                         "fields": text_fields,
                     }
                 })
-            self.style_spans(start, spans, offset=tabs)
+            self.reqs += self.style_spans(start, spans, offset=tabs)
         self.pos = start + length + 1
         return start, length
 
@@ -604,17 +673,7 @@ class TabWriter:
         caption_start = start + 2
         length = u16(caption)
         for span in ((start, start + 2), (caption_start, caption_start + length + 1)):
-            self.reqs.append({
-                "updateParagraphStyle": {
-                    "range": self.rng(*span),
-                    "paragraphStyle": {
-                        "namedStyleType": "NORMAL_TEXT",
-                        "indentStart": {"magnitude": 0, "unit": "PT"},
-                        "indentFirstLine": {"magnitude": 0, "unit": "PT"},
-                    },
-                    "fields": "namedStyleType,indentStart,indentFirstLine",
-                }
-            })
+            self.reqs.append(self._para_style(*span))
         if length:
             self.reqs.append({
                 "updateTextStyle": {
@@ -649,33 +708,29 @@ class TabWriter:
         }], self.token)
 
         cells = self._table_cells()
-        fills = []
-        for (row, col, start) in sorted(cells, key=lambda item: -item[2]):
-            text = rows[row][col] if col < len(rows[row]) else ""
-            plain, _ = inline_spans(text)
-            if plain:
-                fills.append({"insertText": {"location": self.loc(start), "text": plain}})
+        # Each cell's markdown is parsed once and read twice, at the offsets
+        # before the fill and the offsets after it. Parsing it again for the
+        # styling pass was a second chance to disagree about what the cell says.
+        parsed = {(row, col): inline_spans(rows[row][col] if col < len(rows[row]) else "")
+                  for row, col, _ in cells}
+        fills = [{"insertText": {"location": self.loc(start), "text": parsed[(row, col)][0]}}
+                 for row, col, start in sorted(cells, key=lambda item: -item[2])
+                 if parsed[(row, col)][0]]
         if fills:
             gdocs.batch_update(self.doc_id, fills, self.token)
 
         styles: list[dict] = []
-        self.reqs = []
         for (row, col, start) in self._table_cells():
-            text = rows[row][col] if col < len(rows[row]) else ""
-            plain, spans = inline_spans(text)
+            plain, spans = parsed[(row, col)]
             if not plain:
                 continue
             end = start + u16(plain)
-            styles.append({
-                "updateTextStyle": {
-                    "range": self.rng(start, end),
-                    "textStyle": {"bold": True} if row == 0 else {},
-                    "fields": "bold" if row == 0 else RESET_TEXT_FIELDS,
-                }
-            })
-            self.style_spans(start, spans)
-        styles.extend(self.reqs)
-        self.reqs = []
+            styles.append(
+                {"updateTextStyle": {"range": self.rng(start, end),
+                                     "textStyle": {"bold": True}, "fields": "bold"}}
+                if row == 0 else self._reset(start, end)
+            )
+            styles += self.style_spans(start, spans)
         if styles:
             gdocs.batch_update(self.doc_id, styles, self.token)
         self.sync()
@@ -693,13 +748,13 @@ class TabWriter:
         return cells
 
 
-def render_blocks(writer: TabWriter, blocks: list[dict], locals_: dict[str, Path],
+def render_blocks(writer: TabWriter, blocks: list[dict], locals_: dict[str, Figure],
                   images: dict[str, str]) -> None:
     """Render parsed blocks into the tab.
 
-    `images` maps each figure's written target to the URI Docs will fetch;
-    `locals_` maps the local ones to their shrunk copy on disk. A target missing
-    from `locals_` is a remote image, which has no copy and no dimensions here.
+    `images` maps each local figure's written target to the URI Docs will fetch,
+    and a target it does not name is a remote one, which is already a URI Google
+    can reach. `locals_` carries the shrunk copies and their dimensions.
     """
     index = 0
     while index < len(blocks):
@@ -742,18 +797,15 @@ def render_blocks(writer: TabWriter, blocks: list[dict], locals_: dict[str, Path
         elif kind == "image":
             target = block["path"]
             caption = f"{block['alt']}  [{target}]".strip()
-            local = locals_.get(target)
-            if local is None:
+            figure = locals_.get(target)
+            if figure is None:
                 # Remote: there is no file here to measure, so only the width is
-                # stated and Docs keeps the aspect ratio. Opening Pillow for a
-                # figure we never downloaded would also make a remote-only draft
-                # need the optional extra for nothing.
-                writer.image(images[target], caption, FIGURE_WIDTH_PT)
+                # stated and Docs keeps the aspect ratio. A remote-only draft
+                # therefore never needs the optional extra at all.
+                writer.image(images.get(target, target), caption, FIGURE_WIDTH_PT)
             else:
-                Image, _ = _pillow()
-                with Image.open(local) as handle:
-                    ratio = handle.height / handle.width
-                writer.image(images[target], caption, FIGURE_WIDTH_PT,
+                ratio = figure.height / figure.width
+                writer.image(images.get(target, target), caption, FIGURE_WIDTH_PT,
                              round(FIGURE_WIDTH_PT * ratio, 2))
         else:  # pragma: no cover - the parser emits nothing else
             raise RenderError(f"unhandled block kind {kind!r}")
@@ -764,8 +816,8 @@ def render_blocks(writer: TabWriter, blocks: list[dict], locals_: dict[str, Path
 # --- the shared render path --------------------------------------------------
 
 
-def _prepare(source: Path, note: str, out) -> tuple[list[dict], dict[str, Path], Path]:
-    """Shrink the figures and parse the markdown. No network, nothing created yet.
+def _prepare(source: Path, note: str, out) -> tuple[list[dict], dict[str, Figure], Path]:
+    """Parse the markdown and shrink its figures. No network, nothing created yet.
 
     Returns the parsed blocks, a {figure target: shrunk copy} mapping for the
     local figures, and the temporary directory holding those copies — which the
@@ -773,20 +825,25 @@ def _prepare(source: Path, note: str, out) -> tuple[list[dict], dict[str, Path],
     progress line because it is scaffolding, not a result: printing it invited
     the reader to go and look at a directory that is deleted by the time the
     command exits.
+
+    The markdown is parsed first and the figures are taken from the parsed
+    blocks, so there is one reading of the file and one answer to which figures
+    it references.
     """
     source = Path(source)
     if not source.exists():
         raise PublishError(f"source markdown not found: {source}")
 
-    targets = figure_targets(source)
+    blocks = parse_markdown(source, note=note)
+    targets = figure_targets(blocks, source)
     figures = list(dict.fromkeys(targets.values()))
     workdir = Path(tempfile.mkdtemp(prefix="marginal-publish-"))
-    total, shrunk = shrink_figures(figures, workdir / "figures")
+    shrunk = shrink_figures(figures, workdir / "figures")
     locals_ = {target: shrunk[path] for target, path in targets.items()}
     if figures:
+        total = sum(figure.path.stat().st_size for figure in shrunk.values())
         out(f"figures: {len(figures)} shrunk to {total // 1024} KB")
 
-    blocks = parse_markdown(source, note=note)
     counts = _expected(blocks)
     out(f"parsed:  {len(blocks)} blocks, {counts['headings']} headings, "
         f"{counts['tables']} tables, {counts['images']} images")
@@ -826,8 +883,8 @@ def _release(uploads: dict[str, dict], token: str) -> list[str]:
     return left
 
 
-def _render_into(doc_id: str, tab_id: str, blocks: list[dict], locals_: dict[str, Path],
-                 token: str, out) -> tuple[dict, dict, int]:
+def _render_into(doc_id: str, tab_id: str, blocks: list[dict], locals_: dict[str, Figure],
+                 token: str, out) -> tuple[dict, dict]:
     """Upload the figures, render the blocks, verify the result.
 
     The one path both entry points take, so `publish` and `publish-tab` cannot
@@ -836,64 +893,56 @@ def _render_into(doc_id: str, tab_id: str, blocks: list[dict], locals_: dict[str
     first released its own temporary uploads; the caller decides whether the
     wreckage to remove is a tab or a whole document.
 
-    Returns `(uploads, the verified document, expected image count)` and stops
-    there. Releasing the uploads is deliberately the caller's next step rather
-    than the tail of this one: it happens after the tab is known to be good, and
-    a Drive error while tidying up used to arrive as a `RenderError` and trash a
-    document that had already verified.
+    Returns `(uploads, the verified document)` and stops there. Releasing the
+    uploads is deliberately the caller's next step rather than the tail of this
+    one: it happens after the tab is known to be good, and a Drive error while
+    tidying up used to arrive as a `RenderError` and trash a document that had
+    already verified.
     """
     expected = _expected(blocks)
 
     # Every distinct local figure gets one temporary, world-readable Drive copy —
     # Docs fetches the image by URI from its own servers, so a private file is
     # simply not visible to it. A remote figure is already a URI Google can
-    # fetch; copying it to Drive would republish somebody else's image.
+    # fetch; copying it to Drive would republish somebody else's image, so it is
+    # absent from `locals_` and never reaches this loop.
     uploads: dict[str, dict] = {}
     uris: dict[str, str] = {}
+    # One envelope around everything that can leave a Drive copy behind. The
+    # upload loop used to sit outside it: every copy made before a failure stayed
+    # on the account, shared with anyone holding the link, because the caller
+    # deleted the tab and nothing ever touched Drive again.
     try:
-        for block in blocks:
-            if block["kind"] != "image" or block["path"] in uris:
-                continue
-            target = block["path"]
-            if target.startswith(("http://", "https://")):
-                uris[target] = target
-                continue
-            meta = gdocs.upload_png(locals_[target], token)
+        for target, figure in locals_.items():
+            meta = gdocs.upload_png(figure.path, token)
             # Recorded before it is shared, so a share that fails still leaves a
-            # file the rollback below knows about rather than an orphan.
+            # file the rollback knows about rather than an orphan.
             uploads[target] = {"id": meta["id"], "permission": None}
             permission = gdocs.share_anyone(meta["id"], token)
             uploads[target]["permission"] = permission["id"]
             uris[target] = f"https://drive.google.com/uc?export=view&id={meta['id']}"
-    except Exception as exc:
-        # Outside the rollback envelope this loop used to leave every copy made
-        # before the failure public on the account forever: the caller deleted
-        # the tab and nothing ever touched Drive again.
-        _release(uploads, token)
-        raise RenderError(str(exc)) from exc
-    if uploads:
-        out(f"drive:   {len(uploads)} temporary image(s) uploaded and shared")
+        if uploads:
+            out(f"drive:   {len(uploads)} temporary image(s) uploaded and shared")
 
-    try:
         writer = TabWriter(doc_id, tab_id, token)
         render_blocks(writer, blocks, locals_, uris)
-        doc = gdocs.get_tabs(doc_id, token)
-        stats = tab_stats(doc, tab_id)
+        # `render_blocks` ends on a flush, and every flush re-reads the tab, so
+        # the writer is holding the document this verification needs.
+        stats = tab_stats(writer.doc, tab_id)
+        out(f"verify:  headings {stats['headings']}/{expected['headings']}, "
+            f"tables {stats['tables']}/{expected['tables']}, "
+            f"images {stats['images']}/{expected['images']}")
+        if stats != expected:
+            raise RenderError("the rendered tab does not match the parsed markdown")
     except Exception as exc:
         _release(uploads, token)
         raise RenderError(str(exc)) from exc
 
-    out(f"verify:  headings {stats['headings']}/{expected['headings']}, "
-        f"tables {stats['tables']}/{expected['tables']}, "
-        f"images {stats['images']}/{expected['images']}")
-    if stats != expected:
-        _release(uploads, token)
-        raise RenderError("the rendered tab does not match the parsed markdown")
     out("verify:  ok")
-    return uploads, doc, expected["images"]
+    return uploads, writer.doc
 
 
-def _release_images(uploads: dict[str, dict], doc: dict, tab_id: str, images: int,
+def _release_images(uploads: dict[str, dict], doc: dict, tab_id: str,
                     token: str, out) -> None:
     """Give back the temporary Drive copies now the tab is known to be good.
 
@@ -911,7 +960,9 @@ def _release_images(uploads: dict[str, dict], doc: dict, tab_id: str, images: in
         return
     hosted_all = image_content_uris(doc, tab_id)
     hosted = [uri for uri in hosted_all if "googleusercontent.com" in uri]
-    if len(hosted) == len(hosted_all) == images:
+    # No count to compare against: verification has already established that the
+    # tab holds exactly the images the markdown asked for.
+    if len(hosted) == len(hosted_all):
         left = _release(uploads, token)
         if left:
             out(f"images:  {len(uploads) - len(left)} of {len(uploads)} temporary Drive "
@@ -930,9 +981,64 @@ def _release_images(uploads: dict[str, dict], doc: dict, tab_id: str, images: in
 # --- entry points ------------------------------------------------------------
 
 
-def default_tab_title(today: datetime.date | None = None) -> str:
+def default_tab_title() -> str:
     """`v1 — DD-MM`. What the first tab of a new document is called."""
-    return f"v1 — {(today or datetime.date.today()).strftime('%d-%m')}"
+    return f"v1 — {datetime.date.today().strftime('%d-%m')}"
+
+
+@dataclass
+class _Target:
+    """What a publish has made so far, so a failure can take exactly that back.
+
+    Filled in as the document and the tab appear rather than returned at the end,
+    because the steps between them can fail: a document created and then left
+    without a renamed tab is wreckage, and the way back from it depends on how
+    far the creation got.
+    """
+
+    doc_id: str = ""
+    tab_id: str = ""
+
+
+def _publish(source, note: str, out, *, create, undo, url, token: str) -> int:
+    """Prepare, create, render, verify, hand the borrowed copies back. 0, or 3.
+
+    The shape both entry points share, with the three differences between them
+    passed in: `create` makes the tab or the document and records it on the
+    `_Target`, `undo` removes whatever `create` got as far as, and `url` names
+    the finished result. Everything else — which failures are fatal, that the
+    release of the temporary uploads is not one of them, that the shrunk copies
+    are deleted whatever happens — was two copies of one procedure that had
+    already drifted apart: one of them caught only `RenderError`, so a Drive
+    failure while creating the tab escaped as a traceback.
+    """
+    blocks, locals_, workdir = _prepare(Path(source), note, out)
+
+    # The shrunk copies are scaffolding for one render; left behind they
+    # accumulate a directory of every figure of every draft in the system
+    # temporary directory, which nothing ever cleans up.
+    try:
+        target = _Target()
+        try:
+            create(target)
+            uploads, doc = _render_into(
+                target.doc_id, target.tab_id, blocks, locals_, token, out
+            )
+        except (PublishError, gdocs.GoogleApiError) as exc:
+            print(f"publish failed: {exc}", file=sys.stderr)
+            undo(target)
+            return 3
+
+        # Past this line the render has verified, so nothing left to do may
+        # remove it: the release of the temporary uploads reports its own
+        # failures and the command still exits 0.
+        _release_images(uploads, doc, target.tab_id, token, out)
+
+        out("")
+        out(url(target))
+        return 0
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 def publish_tab(doc_id: str, source, tab_title: str, note: str, token: str, out=print) -> int:
@@ -943,40 +1049,27 @@ def publish_tab(doc_id: str, source, tab_title: str, note: str, token: str, out=
     half-written tab is visible to everyone the document is shared with, and it
     is indistinguishable from a version somebody meant to publish.
     """
-    blocks, locals_, workdir = _prepare(Path(source), note, out)
 
-    # The shrunk copies are scaffolding for one render; left behind they
-    # accumulate a directory of every figure of every draft in the system
-    # temporary directory, which nothing ever cleans up.
-    try:
-        try:
-            props = gdocs.add_tab(doc_id, tab_title, token)
-        except RuntimeError as exc:
-            # `add_tab` raises when the reply carries no tabId, which means the
-            # Docs API answered in a shape this code does not know. Nothing was
-            # created, so it is a message rather than a traceback — but it is not
-            # a message the user can act on, so it says what the server said.
-            raise PublishError(f"could not add a tab to {doc_id}: {exc}") from exc
-        tab_id = props["tabId"]
-        out(f"tab:     {tab_id} ({props.get('title')}) index={props.get('index')}")
+    def create(target: _Target) -> None:
+        target.doc_id = doc_id
+        props = gdocs.add_tab(doc_id, tab_title, token)
+        target.tab_id = props["tabId"]
+        out(f"tab:     {target.tab_id} ({props.get('title')}) index={props.get('index')}")
 
-        try:
-            uploads, doc, images = _render_into(doc_id, tab_id, blocks, locals_, token, out)
-        except RenderError as exc:
-            print(f"render failed: {exc}", file=sys.stderr)
-            print(f"cleanup: deleting tab {tab_id}", file=sys.stderr)
-            gdocs.delete_tab(doc_id, tab_id, token)
-            return 3
+    def undo(target: _Target) -> None:
+        # Nothing to delete when `add_tab` itself failed, and asking Docs to
+        # delete a tab id nobody was given is a second error on top of the first.
+        if not target.tab_id:
+            return
+        print(f"cleanup: deleting tab {target.tab_id}", file=sys.stderr)
+        gdocs.delete_tab(doc_id, target.tab_id, token)
 
-        _release_images(uploads, doc, tab_id, images, token, out)
-
+    def url(target: _Target) -> str:
         # Docs hands back tabIds already prefixed with "t."; the anchor is ?tab=t.<id>.
-        anchor = tab_id if tab_id.startswith("t.") else f"t.{tab_id}"
-        out("")
-        out(f"https://docs.google.com/document/d/{doc_id}/edit?tab={anchor}")
-        return 0
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        anchor = target.tab_id if target.tab_id.startswith("t.") else f"t.{target.tab_id}"
+        return f"https://docs.google.com/document/d/{doc_id}/edit?tab={anchor}"
+
+    return _publish(source, note, out, create=create, undo=undo, url=url, token=token)
 
 
 def publish_doc(title: str, source, tab_title: str, note: str, token: str, out=print) -> int:
@@ -991,39 +1084,31 @@ def publish_doc(title: str, source, tab_title: str, note: str, token: str, out=p
     before this call, so there is nothing to preserve, and a document cannot be
     left with zero tabs anyway.
     """
-    blocks, locals_, workdir = _prepare(Path(source), note, out)
 
-    try:
+    def create(target: _Target) -> None:
         created = gdocs.create_document(title, token)
-        doc_id = created.get("documentId")
-        if not doc_id:
+        if not created.get("documentId"):
             raise PublishError(f"documents.create returned no documentId: {created!r}")
+        # Recorded before the next call, because everything after this line is a
+        # network call that can fail on a document that already exists — and one
+        # of them is `_default_tab`, whose fallback fetch used to leave a titled,
+        # empty file on the account by the very function whose contract is to
+        # leave nothing behind.
+        target.doc_id = created["documentId"]
+        target.tab_id = _default_tab(created, target.doc_id, token)
+        out(f"created: {target.doc_id} (tab {target.tab_id})")
+        gdocs.update_tab_title(target.doc_id, target.tab_id, tab_title, token)
 
-        # `_default_tab` sits inside the cleanup, not before it. Its fallback
-        # fetch is a network call like any other, and a document created one line
-        # earlier used to survive that call failing — a titled, empty file left on
-        # the account by the very function whose contract is to leave nothing.
-        try:
-            tab_id = _default_tab(created, doc_id, token)
-            out(f"created: {doc_id} (tab {tab_id})")
-            gdocs.update_tab_title(doc_id, tab_id, tab_title, token)
-            uploads, doc, images = _render_into(doc_id, tab_id, blocks, locals_, token, out)
-        except (PublishError, gdocs.GoogleApiError) as exc:
-            print(f"publish failed: {exc}", file=sys.stderr)
-            print(f"cleanup: trashing the new document {doc_id}", file=sys.stderr)
-            gdocs.trash(doc_id, token)
-            return 3
+    def undo(target: _Target) -> None:
+        if not target.doc_id:
+            return
+        print(f"cleanup: trashing the new document {target.doc_id}", file=sys.stderr)
+        gdocs.trash(target.doc_id, token)
 
-        # Past this line the document has verified, so nothing left to do may
-        # trash it: the release of the temporary uploads reports its own failures
-        # and the command still exits 0.
-        _release_images(uploads, doc, tab_id, images, token, out)
+    def url(target: _Target) -> str:
+        return f"https://docs.google.com/document/d/{target.doc_id}/edit"
 
-        out("")
-        out(f"https://docs.google.com/document/d/{doc_id}/edit")
-        return 0
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    return _publish(source, note, out, create=create, undo=undo, url=url, token=token)
 
 
 def _default_tab(created: dict, doc_id: str, token: str) -> str:

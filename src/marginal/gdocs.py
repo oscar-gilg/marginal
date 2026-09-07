@@ -17,6 +17,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import warnings
 from pathlib import Path
 
@@ -86,47 +87,62 @@ def _call(url: str, token: str, method: str = "GET", body: dict | None = None) -
     if data:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            raw = r.read()
-    except urllib.error.HTTPError as e:
-        raise GoogleApiError(_describe(e, method, url)) from None
-    except urllib.error.URLError as e:
-        raise GoogleApiError(_describe_url_error(e, method, url)) from None
-    return json.loads(raw) if raw else {}
+    return _send(req, method, url)
 
 
 class GoogleApiError(RuntimeError):
     """A Google endpoint answered with an error status; the message names why."""
 
 
-def _describe(e: "urllib.error.HTTPError", method: str, url: str) -> str:
-    """One line: status, the API's own message, and which call it was.
+def _send(req: urllib.request.Request, method: str, url: str) -> dict:
+    """Make one Google call and decode its JSON answer, or raise `GoogleApiError`.
+
+    Every call goes through here, so the timeout, the failure wrapping and the
+    empty-body convention are one decision rather than one per endpoint — the
+    duplicate of these three lines under the upload path is exactly where a gap
+    in the wrapping was found last time.
+
+    An answer that is not JSON is left to raise as itself: it means something
+    that is not the Docs API is answering — a captive portal, a proxy's error
+    page — and calling that a `GoogleApiError` would send the reader looking for
+    a Google-side cause.
+    """
+    raw = _send_bytes(req, method, url)
+    return json.loads(raw) if raw else {}
+
+
+def _send_bytes(req: urllib.request.Request, method: str, url: str) -> bytes:
+    """The same call for an endpoint whose answer is not JSON — the Drive export."""
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            return r.read()
+    except urllib.error.URLError as e:
+        raise GoogleApiError(_describe(e, method, url)) from None
+
+
+def _describe(e: "urllib.error.URLError", method: str, url: str) -> str:
+    """One line: the status if there was one, the API's own words, and which call.
 
     Google puts the reason in the JSON body — "Unknown name X", "insufficient
     permissions" — and `HTTPError` shows only "400: Bad Request", which is the
     difference between a fix and a guess.
+
+    A failure that never reached an HTTP status has neither code nor body: DNS
+    that does not resolve, a refused connection, an expired certificate. Since
+    `HTTPError` is a `URLError`, both arrive here and both leave naming the call
+    they died in. Left unwrapped the second kind escaped as a bare socket error,
+    which told the caller nothing about which of a render's dozens of calls had
+    died — and slid past every `except GoogleApiError` that exists to undo a
+    half-made publish.
     """
+    path = urllib.parse.urlsplit(url).path
+    if not isinstance(e, urllib.error.HTTPError):
+        return f"{method} {path}: {e.reason}"
     try:
-        body = json.loads(e.read().decode("utf-8", "replace"))
-        why = body["error"]["message"]
+        why = json.loads(e.read().decode("utf-8", "replace"))["error"]["message"]
     except Exception:
         why = e.reason
-    path = urllib.parse.urlsplit(url).path
     return f"HTTP {e.code} from {method} {path}: {why}"
-
-
-def _describe_url_error(e: "urllib.error.URLError", method: str, url: str) -> str:
-    """The same one line for a failure that never reached an HTTP status.
-
-    DNS that does not resolve, a refused connection, an expired certificate: the
-    request died below the API, so there is no code and no JSON body. Left
-    unwrapped these escaped as a bare `URLError` naming only the socket, which
-    told the caller nothing about which of a render's dozens of calls had died —
-    and callers that catch `GoogleApiError` to undo their own work never saw it.
-    """
-    path = urllib.parse.urlsplit(url).path
-    return f"{method} {path}: {e.reason}"
 
 
 def _call_bytes(
@@ -143,14 +159,7 @@ def _call_bytes(
     """
     headers = {"Authorization": "Bearer " + token, "Content-Type": content_type}
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            raw = r.read()
-    except urllib.error.HTTPError as e:
-        raise GoogleApiError(_describe(e, method, url)) from None
-    except urllib.error.URLError as e:
-        raise GoogleApiError(_describe_url_error(e, method, url)) from None
-    return json.loads(raw) if raw else {}
+    return _send(req, method, url)
 
 
 # --- document text -----------------------------------------------------------
@@ -309,8 +318,7 @@ def export_markdown(doc_id: str, token: str) -> str:
         f"?mimeType={urllib.parse.quote('text/markdown')}"
     )
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-        return r.read().decode("utf-8")
+    return _send_bytes(req, "GET", url).decode("utf-8")
 
 
 def read_doc(doc_id: str, token: str) -> dict:
@@ -417,7 +425,7 @@ def add_tab(doc_id: str, title: str, token: str) -> dict:
     payload = batch_update(doc_id, [{"addDocumentTab": {"tabProperties": {"title": title}}}], token)
     props = (payload.get("replies") or [{}])[0].get("addDocumentTab", {}).get("tabProperties")
     if not props or not props.get("tabId"):
-        raise RuntimeError(f"addDocumentTab returned no tabId: {json.dumps(payload)[:400]}")
+        raise GoogleApiError(f"addDocumentTab returned no tabId: {json.dumps(payload)[:400]}")
     return props
 
 
@@ -441,7 +449,7 @@ def update_tab_title(doc_id: str, tab_id: str, title: str, token: str) -> dict:
     )
 
 
-def upload_png(path, token: str) -> dict:
+def upload_png(path: Path, token: str) -> dict:
     """Upload a PNG as an ordinary Drive file — no conversion — and return {id, name}.
 
     `insertInlineImage` takes a URI that Google's servers fetch, so the bytes have
@@ -449,10 +457,6 @@ def upload_png(path, token: str) -> dict:
     `share_anyone` makes it reachable and `unshare`/`trash` take it away again once
     Docs has copied it.
     """
-    import uuid
-    from pathlib import Path as _Path
-
-    path = _Path(path)
     boundary = uuid.uuid4().hex
     metadata = json.dumps({"name": path.name, "mimeType": "image/png"}).encode()
     sep = f"--{boundary}\r\n".encode()

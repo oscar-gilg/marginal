@@ -360,8 +360,8 @@ def fake_pillow(monkeypatch, ratio=0.5):
         for number, figure in enumerate(figures, start=1):
             target = out_dir / f"figure-{number:02d}{figure.suffix or '.png'}"
             target.write_bytes(b"png")
-            shrunk[figure] = target
-        return 0, shrunk
+            shrunk[figure] = publish.Figure(target, 100, int(100 * ratio))
+        return shrunk
 
     monkeypatch.setattr(publish, "_pillow", lambda: (FakeImage, None))
     monkeypatch.setattr(publish, "shrink_figures", shrink)
@@ -409,7 +409,9 @@ def test_a_link_becomes_a_span_carrying_its_url():
 
 def test_an_image_line_is_not_read_as_a_link(tmp_path):
     blocks = publish.parse_markdown(md(tmp_path, "![A chart](figs/a.png)\n"))
-    assert blocks == [{"kind": "image", "alt": "A chart", "path": "figs/a.png"}]
+    assert blocks == [
+        {"kind": "image", "alt": "A chart", "path": "figs/a.png", "remote": False}
+    ]
 
 
 def test_bullets_nest_by_indent_and_numbered_lists_stay_separate(tmp_path):
@@ -449,6 +451,13 @@ def test_a_blockquote_splits_on_its_blank_lines(tmp_path):
 # --- figure resolution -------------------------------------------------------
 
 
+def _figures(source: Path) -> list[Path]:
+    """The distinct local figure files `source` references, in order."""
+    return list(dict.fromkeys(
+        publish.figure_targets(publish.parse_markdown(source), source).values()
+    ))
+
+
 def test_a_figure_resolves_next_to_the_markdown_before_the_repository_root(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / "figs").mkdir()
@@ -460,7 +469,7 @@ def test_a_figure_resolves_next_to_the_markdown_before_the_repository_root(tmp_p
     source = md(sub, "![c](figs/a.png)\n")
     # The file's own directory wins: a markdown file is written to be read where
     # it sits, and the repository root is the special case.
-    assert publish.figure_paths(source) == [sub / "figs" / "a.png"]
+    assert _figures(source) == [sub / "figs" / "a.png"]
 
 
 def test_a_figure_only_at_the_repository_root_is_still_found(tmp_path):
@@ -469,17 +478,17 @@ def test_a_figure_only_at_the_repository_root_is_still_found(tmp_path):
     (tmp_path / "figs" / "a.png").write_bytes(b"x")
     sub = tmp_path / "studies"
     sub.mkdir()
-    assert publish.figure_paths(md(sub, "![c](figs/a.png)\n")) == [tmp_path / "figs" / "a.png"]
+    assert _figures(md(sub, "![c](figs/a.png)\n")) == [tmp_path / "figs" / "a.png"]
 
 
 def test_a_missing_figure_names_the_reference(tmp_path):
     with pytest.raises(publish.PublishError) as e:
-        publish.figure_paths(md(tmp_path, "![c](figs/gone.png)\n"))
+        _figures(md(tmp_path, "![c](figs/gone.png)\n"))
     assert "figs/gone.png" in str(e.value) and "draft.md" in str(e.value)
 
 
 def test_a_remote_image_is_left_to_docs(tmp_path):
-    assert publish.figure_paths(md(tmp_path, "![c](https://example.org/a.png)\n")) == []
+    assert _figures(md(tmp_path, "![c](https://example.org/a.png)\n")) == []
 
 
 # --- Pillow is optional ------------------------------------------------------
@@ -504,7 +513,7 @@ def test_a_publish_with_no_figures_never_imports_pillow(tmp_path, monkeypatch, d
     source = md(tmp_path, "# Title\n\nA paragraph with **bold** in it.\n\n- one\n- two\n")
     out = []
     assert publish.publish_tab("doc1", source, "v1", "", "tok", out=out.append) == 0
-    assert publish.shrink_figures([], tmp_path / "out") == (0, {})
+    assert publish.shrink_figures([], tmp_path / "out") == {}
 
 
 # --- index arithmetic --------------------------------------------------------
@@ -707,7 +716,7 @@ def test_cleanup_revokes_the_link_before_it_trashes_the_copy(tmp_path, docs, mon
 
 
 def test_a_remote_figure_is_handed_to_docs_as_its_own_url(tmp_path, docs, monkeypatch):
-    """`figure_paths` skips remote images; the renderer used to not.
+    """`figure_targets` skips remote images; the renderer used to not.
 
     It rebuilt a local path from the URL's last segment, uploaded whatever
     happened to be sitting there under that name, and shared it — which for a

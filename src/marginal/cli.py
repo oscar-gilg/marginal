@@ -131,6 +131,50 @@ def _reacts(obj: dict) -> str:
     return "  " + "  ".join(out) if out else ""
 
 
+def _print_threads(comments: list[dict]) -> None:
+    """One line each, for scanning: a long thread must not push the next off screen."""
+    for c in comments:
+        mark = "\u2713" if c.get("resolved") else " "
+        quoted = (c.get("quotedFileContent") or {}).get("value", "")
+        print(f"[{mark}] {c['id']}  {c['author']['displayName']}{_reacts(c)}")
+        print(f"     on: {quoted[:70]!r}")
+        print(f"     {c['content'][:100]}")
+        for r in c.get("replies", []):
+            print(f"       \u21b3 {r['author']['displayName']}: {r['content'][:80]}{_reacts(r)}")
+
+
+def _print_threads_full(comments: list[dict]) -> None:
+    """Every thread whole, for the other question: what did they actually say.
+
+    The default listing truncates, and the part that mattered is exactly the part
+    it cut. Re-reading it in the browser is the thing this command exists to
+    avoid, so `--full` prints the full anchor, the full comment and every reply.
+    """
+    open_count = sum(1 for c in comments if not c.get("resolved"))
+    print(f"{len(comments)} thread(s), {open_count} open\n")
+    for i, c in enumerate(comments, 1):
+        state = "RESOLVED" if c.get("resolved") else "open"
+        who = (c.get("author") or {}).get("displayName", "?")
+        print(f"[{i}] {state}  {who}  {c.get('createdTime', '')}  "
+              f"id={c['id']}{_reacts(c)}")
+        quoted = (c.get("quotedFileContent") or {}).get("value")
+        if quoted:
+            # Whitespace collapsed, nothing dropped: an anchor spanning a
+            # paragraph break is one quotation, not two lines of output.
+            print(f"    on: {' '.join(quoted.split())}")
+        for line in (c.get("content") or "").splitlines() or [""]:
+            print(f"    {line}")
+        for r in c.get("replies", []):
+            rwho = (r.get("author") or {}).get("displayName", "?")
+            # `action` is how Drive reports a resolve or a reopen, which arrive
+            # as replies with no content of their own.
+            action = f" ({r['action']})" if r.get("action") else ""
+            stamp = r.get("createdTime", "")
+            body = " ".join((r.get("content") or "").split())
+            print(f"    -> {rwho}{action}  {stamp}: {body}{_reacts(r)}")
+        print()
+
+
 def _colour(code: str, text: str) -> str:
     """ANSI, and only to a terminal. A pipe or a file gets plain text."""
     return f"\033[{code}m{text}\033[0m" if sys.stdout.isatty() else text
@@ -523,41 +567,19 @@ def _dispatch(a) -> int:
             print("Sign in to Google in this window once; the session persists.")
         return 0
 
-    # Also before the document is parsed, and for the same reason `setup` is:
-    # `publish --title` has no document at all yet — it is about to create one —
-    # so it mints its own token rather than falling through to the shared step
-    # below, which starts by insisting on a document id.
-    if a.cmd == "publish":
-        try:
-            token = gdocs.access_token(cfg.credentials, account=cfg.account)
-        except (FileNotFoundError, auth.AuthError) as e:
-            sys.exit(f"marginal: {e}")
-        try:
-            if a.doc:
-                if not a.tab_title:
-                    sys.exit("marginal: --tab-title is required with --doc")
-                return publish_tab(
-                    gdocs.doc_id_from_url(a.doc), a.markdown, a.tab_title, a.note, token
-                )
-            return publish_doc(
-                a.title, a.markdown, a.tab_title or default_tab_title(), a.note, token
-            )
-        except ValueError as e:
-            sys.exit(f"marginal: {e}")
-        except PublishError as e:
-            # A missing figure, a markdown file that is not there, a Pillow that
-            # is not installed. Each one is a line telling the user what to fix.
-            sys.exit(f"marginal: {e}")
-
+    # `publish --title` is about to create the document it writes into, so it is
+    # the one command past this point with no document to name. That is a reason
+    # for the shared step to allow none, rather than a reason for `publish` to
+    # mint its own token above and skip everything the other commands share.
     try:
-        doc_id = gdocs.doc_id_from_url(a.doc)
+        doc_id = gdocs.doc_id_from_url(a.doc) if getattr(a, "doc", None) else None
     except ValueError as e:
         sys.exit(f"marginal: {e}")
 
     # A pasted URL names a tab; an explicit --tab beats it. Without this the tab in
     # the URL was dropped and the run fell through to whichever tab came first.
     # `hasattr` because the subcommands that need no tab do not define the flag.
-    if hasattr(a, "tab") and a.tab is None:
+    if doc_id and hasattr(a, "tab") and a.tab is None:
         a.tab = gdocs.tab_from_url(a.doc)
 
     # `comment` is the mode-neutral name: the config decides which of the two
@@ -600,10 +622,11 @@ def _dispatch(a) -> int:
     # did not, even though it reads through the browser and verifies through
     # `browser_reader` exactly as agent mode does. The commands below reach Drive
     # whatever the source: they read the comment list, or write to it.
-    # `publish` is in the list because it does reach Drive, and this list is the
-    # answer to "which commands do"; it returns above before ever getting here.
-    reads_drive = a.cmd in ("read", "list", "reply", "unpost", "respond", "post", "publish")
-    reads_drive = reads_drive or cfg.source != "browser"
+    #
+    # Taken from `setup`, which prints the same list when it explains what an
+    # unauthenticated machine cannot do. Written out twice the two drifted, and a
+    # command missing from this copy asked for no token and failed inside Drive.
+    reads_drive = a.cmd in setup_mod.NEEDS_OAUTH or cfg.source != "browser"
     try:
         token = (
             gdocs.access_token(cfg.credentials, account=cfg.account) if reads_drive else None
@@ -612,6 +635,20 @@ def _dispatch(a) -> int:
         # Configuration, not a bug. A traceback here buries the one line that says
         # what to set, which is the whole message a new user needs.
         sys.exit(f"marginal: {e}")
+
+    if a.cmd == "publish":
+        try:
+            if doc_id:
+                if not a.tab_title:
+                    sys.exit("marginal: --tab-title is required with --doc")
+                return publish_tab(doc_id, a.markdown, a.tab_title, a.note, token)
+            return publish_doc(
+                a.title, a.markdown, a.tab_title or default_tab_title(), a.note, token
+            )
+        except (ValueError, PublishError) as e:
+            # A missing figure, a markdown file that is not there, a Pillow that
+            # is not installed. Each one is a line telling the user what to fix.
+            sys.exit(f"marginal: {e}")
 
     if a.cmd == "read":
         doc = gdocs.read_doc(doc_id, token)
@@ -640,47 +677,7 @@ def _dispatch(a) -> int:
                 unmatched = reactions.attach(comments, reactions.from_export(page, doc_id))
             finally:
                 page.close()
-        if a.full:
-            # The default listing is a scan: one line each, so a long thread does
-            # not push the next one off the screen. `--full` is for the other
-            # question — what did they actually say — where a truncated comment is
-            # exactly the part that mattered, and re-reading it in the browser is
-            # the thing this command exists to avoid.
-            open_count = sum(1 for c in comments if not c.get("resolved"))
-            print(f"{len(comments)} thread(s), {open_count} open\n")
-            for i, c in enumerate(comments, 1):
-                state = "RESOLVED" if c.get("resolved") else "open"
-                who = (c.get("author") or {}).get("displayName", "?")
-                print(f"[{i}] {state}  {who}  {c.get('createdTime', '')}  "
-                      f"id={c['id']}{_reacts(c)}")
-                quoted = (c.get("quotedFileContent") or {}).get("value")
-                if quoted:
-                    # Whitespace collapsed, nothing dropped: an anchor spanning a
-                    # paragraph break is one quotation, not two lines of output.
-                    print(f"    on: {' '.join(quoted.split())}")
-                for line in (c.get("content") or "").splitlines() or [""]:
-                    print(f"    {line}")
-                for r in c.get("replies", []):
-                    rwho = (r.get("author") or {}).get("displayName", "?")
-                    # `action` is how Drive reports a resolve or a reopen, which
-                    # arrive as replies with no content of their own.
-                    action = f" ({r['action']})" if r.get("action") else ""
-                    stamp = r.get("createdTime", "")
-                    body = " ".join((r.get("content") or "").split())
-                    print(f"    -> {rwho}{action}  {stamp}: {body}{_reacts(r)}")
-                print()
-            for text in unmatched:
-                print(f"! reaction on an unmatched card: {text!r}")
-            return 0
-
-        for c in comments:
-            mark = "✓" if c.get("resolved") else " "
-            quoted = (c.get("quotedFileContent") or {}).get("value", "")
-            print(f"[{mark}] {c['id']}  {c['author']['displayName']}{_reacts(c)}")
-            print(f"     on: {quoted[:70]!r}")
-            print(f"     {c['content'][:100]}")
-            for r in c.get("replies", []):
-                print(f"       ↳ {r['author']['displayName']}: {r['content'][:80]}{_reacts(r)}")
+        (_print_threads_full if a.full else _print_threads)(comments)
         for text in unmatched:
             # A reaction visible in the document and absent from this output is the
             # failure worth naming; silence would read as "there were none".

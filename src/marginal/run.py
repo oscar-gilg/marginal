@@ -44,6 +44,7 @@ from __future__ import annotations
 import dataclasses
 
 import fcntl
+import sys
 import json
 import threading
 import time
@@ -198,7 +199,17 @@ def browser_lock(doc_id: str):
     LOCK_DIR.mkdir(parents=True, exist_ok=True)
     path = LOCK_DIR / f"{doc_id}.lock"
     with open(path, "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Say so. A queued poster that prints nothing is indistinguishable from
+            # a hung one, and a subagent watching it relaunches — which only
+            # lengthens the queue it is waiting in.
+            print(
+                f"waiting: another post is in the editor of {doc_id}; queued behind it",
+                file=sys.stderr, flush=True,
+            )
+            fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             yield
         finally:

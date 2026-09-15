@@ -408,3 +408,60 @@ def test_each_tab_is_rendered_for_the_threads_anchored_in_it(monkeypatch):
     second = "".join(b.get("text", "") for b in sent[1])
     assert "alpha only" in first and "beta only" not in first
     assert "beta only" in second and "alpha only" not in second
+
+
+# --- paragraph jumps on Linux -------------------------------------------------
+
+
+def test_paragraph_navigation_uses_the_chord_docs_binds_on_this_platform():
+    # Docs jumps paragraphs on Option+Down on macOS and Ctrl+Down everywhere else.
+    # The driver sent Alt+Down unconditionally; on Linux Docs ignored it, the caret
+    # stayed at the document start, and every anchor fell back to walking there one
+    # ArrowRight at a time — thousands of keystrokes per comment, then "selection
+    # not confirmed". Nothing raised; the run just took fifteen minutes and posted
+    # nothing.
+    import sys
+
+    from test_cdp import FakeSocket
+
+    from marginal import cdp, docs_ui
+
+    ws = FakeSocket()
+    page = cdp.Page(ws=ws, target_id=None)
+    paragraphs = [{"start": 0, "end": 10}, {"start": 10, "end": 30}, {"start": 30, "end": 60}]
+    docs_ui._navigate_to(page, 35, paragraphs, "paragraph")
+    keys = [(p["key"], p["modifiers"]) for p in ws.params_for("Input.dispatchKeyEvent")
+            if p["type"] == "keyDown"]
+    downs = [m for k, m in keys if k == "ArrowDown"]
+    assert downs == [cdp.PARA, cdp.PARA]
+    assert cdp.PARA == (cdp.ALT if sys.platform == "darwin" else cdp.CTRL)
+    # Ctrl+Down stops at the end of the paragraph before the target, so off macOS
+    # one ArrowRight steps onto its first character before the within-paragraph walk.
+    rights = sum(1 for k, _ in keys if k == "ArrowRight")
+    assert rights == 5 + (0 if sys.platform == "darwin" else 1)
+
+
+def test_a_poster_queued_behind_another_says_so(monkeypatch, tmp_path, capsys):
+    # Several post-batch processes serialise on the per-document lock. One that
+    # printed nothing while queued looked hung, and the agent watching it relaunched
+    # it — joining the same queue and lengthening it.
+    import threading
+    import time
+
+    from marginal import run
+
+    monkeypatch.setattr(run, "LOCK_DIR", tmp_path)
+    holding = threading.Event()
+
+    def hold():
+        with run.browser_lock("doc1"):
+            holding.set()
+            time.sleep(0.2)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    holding.wait(2)
+    with run.browser_lock("doc1"):
+        pass
+    t.join()
+    assert "queued behind it" in capsys.readouterr().err

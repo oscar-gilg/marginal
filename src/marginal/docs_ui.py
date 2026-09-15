@@ -27,7 +27,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from .cdp import ALT, META, SHIFT, Page
+from .cdp import ALT, META, PARA, SHIFT, Page
 
 # The comment composer, across the selectors Docs has used for it.
 _COMPOSER_SEL = (
@@ -110,8 +110,13 @@ def _navigate_to(page: Page, offset: int, paragraphs: list[dict], strategy: str)
     if strategy == "paragraph":
         idx, para_start = paragraph_of(paragraphs, offset)
         if idx:
-            page.key("ArrowDown", ALT, count=idx)
+            page.key("ArrowDown", PARA, count=idx)
             events += idx
+            if PARA is not ALT:
+                # Ctrl+Down stops at the end of a paragraph, one caret slot before
+                # the next paragraph's first character; Option+Down lands on it.
+                page.key("ArrowRight")
+                events += 1
         within = offset - para_start
         if within:
             page.key("ArrowRight", count=within)

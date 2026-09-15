@@ -218,6 +218,7 @@ def test_setup_launches_headful_even_when_the_config_says_headless(monkeypatch):
     # part Google refuses. A `headless = true` config must not make setup open the
     # one browser the step cannot be completed in.
     seen = {}
+    monkeypatch.setenv("DISPLAY", ":0")  # a Linux box with no display cannot go headful
     monkeypatch.setattr(setup, "chrome_running", lambda port: False)
     monkeypatch.setattr(
         setup,

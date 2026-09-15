@@ -12,6 +12,8 @@ failure mode that makes a naive driver look like it works while doing nothing.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import time
 import urllib.parse
@@ -20,7 +22,14 @@ from dataclasses import dataclass, field
 
 import websocket
 
-ALT, CTRL, META, SHIFT = 1, 2, 4, 8
+ALT, CTRL, _META_MAC, SHIFT = 1, 2, 4, 8
+# Docs binds its chords to Cmd on macOS and Ctrl elsewhere; callers say META and
+# get whichever the host Chrome expects.
+import sys as _sys
+
+META = _META_MAC if _sys.platform == "darwin" else CTRL
+# Docs' "move to next paragraph" is Option+Down on macOS and Ctrl+Down elsewhere.
+PARA = ALT if _sys.platform == "darwin" else CTRL
 
 # key name -> (key, code, windowsVirtualKeyCode)
 KEYS = {
@@ -39,6 +48,23 @@ KEYS = {
 }
 
 
+MAC_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+
+def find_chrome() -> str | None:
+    """Locate a Chrome binary: $MARGINAL_CHROME, the macOS bundle, then PATH."""
+    env = os.environ.get("MARGINAL_CHROME")
+    if env and os.path.exists(env):
+        return env
+    if os.path.exists(MAC_CHROME):
+        return MAC_CHROME
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
 def launch_chrome(
     profile_dir: str, port: int = 9222, url: str | None = None, headless: bool = False
 ) -> subprocess.Popen:
@@ -54,7 +80,9 @@ def launch_chrome(
     in a headless browser. Whether clipboard read-back survives headless is
     unverified: it needs a focused document, and focus semantics differ.
     """
-    chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    chrome = find_chrome()
+    if chrome is None:
+        raise FileNotFoundError("Google Chrome not found; set MARGINAL_CHROME")
     args = [
         chrome,
         f"--remote-debugging-port={port}",
@@ -64,6 +92,8 @@ def launch_chrome(
     ]
     if headless:
         args += ["--headless=new", "--window-size=1400,1000"]
+    if os.geteuid() == 0 if hasattr(os, "geteuid") else False:
+        args.append("--no-sandbox")
     if url:
         args.append(url)
     return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

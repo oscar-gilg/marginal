@@ -99,7 +99,14 @@ def test_the_key_codes_are_the_ones_the_platform_defines():
 def test_the_modifier_bits_are_the_ones_the_protocol_defines():
     # Cmd+Opt+M is the comment shortcut; a wrong bit sends a different chord and the
     # editor does something else, or nothing, with no error either way.
-    assert (cdp.ALT, cdp.CTRL, cdp.META, cdp.SHIFT) == (1, 2, 4, 8)
+    assert (cdp.ALT, cdp.CTRL, cdp._META_MAC, cdp.SHIFT) == (1, 2, 4, 8)
+    # Docs binds its chords to Cmd on macOS and Ctrl elsewhere; META is whichever
+    # the host Chrome expects, and PARA (paragraph jump) is Option there, Ctrl here.
+    import sys
+
+    mac = sys.platform == "darwin"
+    assert cdp.META == (cdp._META_MAC if mac else cdp.CTRL)
+    assert cdp.PARA == (cdp.ALT if mac else cdp.CTRL)
 
 
 def test_a_key_sends_a_down_and_an_up_in_that_order():

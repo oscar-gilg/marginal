@@ -36,6 +36,7 @@ import json
 
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,10 +44,13 @@ from . import auth, browser_source, gdocs, model
 from .cdp import Page, launch_chrome, wait_for_port
 from .config import Config
 
-# `cdp.launch_chrome` hardcodes this, and the selection path sends Cmd-modified
-# keys, so the tool is macOS-only in practice. Named here as well so the failure is
-# "no Chrome at this path" during setup rather than a Popen error mid-run.
-CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# Resolved the same way `cdp.launch_chrome` resolves it ($MARGINAL_CHROME, the
+# macOS bundle, then PATH), so setup fails with "no Chrome" rather than a Popen
+# error mid-run. The selection path still sends Cmd-modified keys, so Linux support
+# is best-effort.
+from .cdp import find_chrome
+
+CHROME = find_chrome() or "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 CONFIG_NAME = "marginal.toml"
 
@@ -97,7 +101,11 @@ def start_chrome(cfg: Config, timeout: float = 30.0) -> Check:
     """
     if chrome_running(cfg.port):
         return Check("Chrome profile", True, f"already running on port {cfg.port}")
-    launch_chrome(cfg.profile, port=cfg.port, url="https://docs.google.com/", headless=False)
+    # No display (a headless Linux box) means headful cannot start at all; fall
+    # back to headless so the check can still reach the port. Sign-in then has to
+    # happen via a virtual display (Xvfb + VNC) or an imported session.
+    headless = sys.platform != "darwin" and not os.environ.get("DISPLAY")
+    launch_chrome(cfg.profile, port=cfg.port, url="https://docs.google.com/", headless=headless)
     try:
         wait_for_port(cfg.port, timeout=timeout)
     except TimeoutError:

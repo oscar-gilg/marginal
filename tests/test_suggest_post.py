@@ -182,22 +182,63 @@ def _edited_state(typed):
     return read
 
 
-def test_a_real_edit_aborts_the_batch_and_sends_one_undo(monkeypatch):
+def test_an_untracked_replacement_under_an_unconfirmed_mode_stops_the_batch_without_undo(monkeypatch):
     # The canary's positive case: the replacement is in the live stream, no
     # tracked change records it, and the editor did not read suggesting mode
-    # after typing. Everything after the first typing must not run.
+    # after typing. Either the author accepted it or it was a real edit; the
+    # export cannot tell, so nothing is undone — an undo of an acceptance would
+    # delete the author's text — and everything after must not run.
     typed = []
     run, page, _ = _post(
         monkeypatch,
         [("Alpha one", "Alpha ONE"), ("Gamma five", "Gamma FIVE")],
         typed=typed, state=_edited_state(typed), mode_after="editing",
     )
-    assert ("z", META) in page.keys
+    assert ("z", META) not in page.keys
     first = next(r for r in run.results if r.quote == "Gamma five")  # bottom-up: typed first
     rest = next(r for r in run.results if r.quote == "Alpha one")
-    assert not first.ok and "REAL EDIT" in first.error
+    assert not first.ok and not first.accepted
+    assert "REAL EDIT" in first.error and "editing mode" in first.error
+    assert "'Gamma five'" in first.error and "'Gamma FIVE'" in first.error
+    assert "Nothing was undone" in first.error
     assert not rest.ok and rest.error.startswith("not attempted")
     assert len(typed) == 1
+
+
+def test_an_unreadable_probe_over_an_accepted_suggestion_is_never_undone(monkeypatch):
+    # Codex review, finding 1: a probe exception used to become mode_ok=False,
+    # and with the author's acceptance in the export that read as "edited" —
+    # one undo, deleting text the author had just accepted.
+    typed = []
+
+    def unreadable(n_typed):
+        raise RuntimeError("editor mode could not be read")
+
+    run, page, _ = _post(
+        monkeypatch, [("Beta three", "Beta 3")], typed=typed, state=_edited_state(typed),
+        mode_after=unreadable,
+    )
+    [r] = run.results
+    assert ("z", META) not in page.keys
+    assert r.mode_after is None
+    assert not r.ok and not r.accepted
+    assert "an unreadable mode" in r.error and "Nothing was undone" in r.error
+
+
+def test_the_same_picture_with_the_mode_confirmed_is_an_acceptance(monkeypatch):
+    # The residual risk, pinned on purpose: a real edit followed by a probe that
+    # reads suggesting is indistinguishable from an acceptance and is reported as
+    # one — with the note, and with the "unverified" label in the report — so the
+    # operator knows to look. There is no undo on this path either.
+    typed = []
+    run, page, _ = _post(
+        monkeypatch, [("Beta three", "Beta 3")], typed=typed, state=_edited_state(typed),
+        mode_after="suggesting",
+    )
+    [r] = run.results
+    assert r.ok and r.accepted
+    assert ("z", META) not in page.keys
+    assert any("rests on the editor reading suggesting mode" in n for n in run.notes)
 
 
 def test_a_verified_suggestion_reports_its_exact_halves(monkeypatch):
@@ -359,7 +400,7 @@ def test_the_accepted_text_is_reported_as_accepted_not_suggested(capsys):
                                replacement="better", accepted=True)]
     assert cli._report(run, [], []) == 0
     out = capsys.readouterr().out
-    assert "accepted by the author" in out and "→ better" in out
+    assert "accepted (unverified" in out and "→ better" in out
 
 
 # --- smart punctuation (2026-09-16) -------------------------------------------
@@ -497,10 +538,10 @@ def test_a_mode_that_drops_out_of_suggesting_stops_the_batch_before_the_next_ite
     assert any("stopped typing" in n for n in run.notes)
 
 
-def test_a_real_edit_on_a_later_item_is_caught_and_undone(monkeypatch):
-    # Not the first item: the second one typed as a real edit. The mode probe
-    # after it reads "editing", the export shows plain text and nothing tracked,
-    # so it is undone and the batch stops — one real edit is never followed by more.
+def test_an_untracked_replacement_on_a_later_item_stops_the_batch(monkeypatch):
+    # Not the first item: the second one is plain text with nothing tracking it
+    # and the probe after it reads "editing". Reported, not undone, and the batch
+    # stops — one real edit is never followed by more.
     typed = []
 
     def state():
@@ -523,7 +564,38 @@ def test_a_real_edit_on_a_later_item_is_caught_and_undone(monkeypatch):
     assert by_quote["Gamma five"].ok
     assert not by_quote["Beta three"].ok and "REAL EDIT" in by_quote["Beta three"].error
     assert by_quote["Alpha one"].error.startswith("not attempted")
-    assert page.keys.count(("z", META)) == 1
+    assert ("z", META) not in page.keys
+
+
+def test_a_lagging_canary_cannot_turn_an_unconfirmed_mode_into_an_acceptance(monkeypatch):
+    # Codex review, finding 2: the probe reads "editing", both canary reads lag
+    # ("unknown"), the batch stops — and the final verification then sees the
+    # plain text. Without the probe it used to call that accepted and record it.
+    typed = []
+    reads = {"n": 0}
+
+    def lagging():
+        reads["n"] += 1
+        if not typed or reads["n"] <= 3:  # baseline + two canary reads lag
+            return DOC, []
+        stream = DOC
+        for q, r in typed:
+            stream = stream.replace(q, r)
+        return stream, []
+
+    rows = []
+    run, page, _ = _post(
+        monkeypatch, [("Alpha one", "Alpha 1"), ("Beta three", "Beta 3")],
+        typed=typed, state=lagging, mode_after="editing",
+        record=lambda r: rows.append(r.quote),
+    )
+    by_quote = {r.quote: r for r in run.results}
+    assert len(typed) == 1  # the batch stopped after the first item
+    first = by_quote["Beta three"]
+    assert not first.ok and not first.accepted
+    assert "editing mode" in first.error and "REAL EDIT" in first.error
+    assert by_quote["Alpha one"].error.startswith("not attempted")
+    assert rows == [] and ("z", META) not in page.keys
 
 
 def test_an_unreadable_switcher_after_typing_is_kept_as_unknown_not_guessed(monkeypatch):
@@ -547,3 +619,60 @@ def test_an_unreadable_switcher_after_typing_is_kept_as_unknown_not_guessed(monk
     # Tracked, so it verifies; the plain-text-with-no-tracked-change picture would
     # have been a real edit here, since the mode was not confirmed.
     assert r.ok
+
+
+# --- the ledger row is written at the canary, not only at the end ----------
+
+
+def test_a_suggestion_the_canary_confirms_is_recorded_before_the_next_one_types(monkeypatch):
+    # Codex review, finding 4: a run killed while later suggestions typed lost
+    # the row for the first one, although the canary had already confirmed it.
+    rows = []
+    typed = []
+
+    class Killed(BaseException):
+        pass
+
+    def suggest(page, span, replacement, paragraphs, strategy, text=None):
+        if typed:
+            raise Killed()
+        typed.append((span.quote, replacement))
+        return 3
+
+    with pytest.raises(Killed):
+        _post(
+            monkeypatch, [("Alpha one", "Alpha 1"), ("Beta three", "Beta 3")],
+            typed=typed, suggest=suggest, record=lambda r: rows.append(r.quote),
+        )
+    assert rows == ["Beta three"]
+
+
+def test_a_suggestion_recorded_at_the_canary_is_not_recorded_again(monkeypatch):
+    rows = []
+    run, _, _ = _post(
+        monkeypatch,
+        [("Alpha one", "Alpha 1"), ("Beta three", "Beta 3"), ("Gamma five", "Gamma 5")],
+        record=lambda r: rows.append(r.quote),
+    )
+    assert all(r.ok for r in run.results)
+    assert sorted(rows) == ["Alpha one", "Beta three", "Gamma five"]
+
+
+# --- an echo of the replacement elsewhere is not evidence (Codex finding 3) --
+
+
+def test_an_echo_passage_with_the_same_surroundings_does_not_verify_an_untyped_edit():
+    # Two passages with identical surroundings; one already holds the replacement.
+    # The author touches the original's tail, our typing never lands. Presence of
+    # "surroundings + replacement" is then true on the strength of the echo alone;
+    # only "one more than the baseline had" says this location changed.
+    from marginal.post import Result, _accepted
+
+    pad = "\n" * 7
+    baseline = pad + "aa Beta 3 zz\n" + pad + "aa Beta three zz\n"
+    stream = pad + "aa Beta 3 zz\n" + pad + "aa Beta three ZZ\n"
+    r = Result(quote="Beta three", body="", ok=True, kind="suggestion", replacement="Beta 3")
+    assert not _accepted(r, stream, baseline, [])
+    # And the genuine acceptance, echo and all, still verifies.
+    landed = pad + "aa Beta 3 zz\n" + pad + "aa Beta 3 zz\n"
+    assert _accepted(r, landed, baseline, [])

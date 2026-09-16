@@ -176,7 +176,9 @@ capability in the same words, through the brief.
 The editor mode is probed immediately before and immediately after every typed
 suggestion, and the first one is also read back from an export before any more
 are typed; a probe that stops reading Suggesting stops the batch, so one real
-edit is never followed by more.
+edit is never followed by more. Nothing is ever undone: a replacement left as
+plain text with no tracked change is what an acceptance and a real edit both
+leave behind, so it is reported with the text to check rather than reverted.
 
 There is no un-suggest: a suggestion has no Drive id, so withdrawing one is done
 in the Docs UI. The ledger records each with `kind: "suggestion"` for the audit

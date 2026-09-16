@@ -40,13 +40,18 @@ class Result:
     # empty); the edit itself is `quote` -> `replacement`.
     kind: str = "comment"
     replacement: str | None = None
-    # Suggestions only. `accepted` is the second ok state: no tracked change was
-    # read back because the author accepted the suggestion before verification
-    # could see it, and the replacement now sits as plain text where the quote
-    # was. `mode_after` is what the editor's mode switcher read immediately after
-    # the replacement was typed — the per-item evidence that the keystrokes were
-    # tracked, cheap enough to take every time where an export is not.
-    accepted: bool = False
+    # Suggestions only. `unverified` is the third outcome, neither ok nor a hard
+    # failure: no tracked change was read back, and the replacement now sits as
+    # plain text where the quote was. That is what the author accepting the
+    # suggestion before verification could see it leaves behind — and also what
+    # a real edit leaves behind, and nothing read back afterwards can tell the
+    # two apart. `ok` stays False, `error` stays None and `status` says what to
+    # check. `mode_after` is what the editor's mode switcher read immediately
+    # after the replacement was typed — the per-item evidence that the
+    # keystrokes were tracked, cheap enough to take every time where an export
+    # is not.
+    unverified: bool = False
+    status: str | None = None
     mode_after: str | None = None
 
 
@@ -510,79 +515,140 @@ def _fresh_sites(sites: list[dict], before: Counter) -> list[dict]:
     return out
 
 
-_CONTEXT_LADDER = (32, 16, 8, 0)
+def _baseline_offset(baseline: str, r: Result) -> int | None:
+    """Where `r`'s quote sits in the baseline stream, or None if not exactly once."""
+    quote = _want_key(r)[0]
+    folded = fold_quotes(baseline)
+    return folded.index(quote) if folded.count(quote) == 1 else None
 
 
-def _accepted(r: Result, stream: str, baseline: str, fresh_sites: list[dict]) -> bool:
-    """Whether `r`'s replacement now sits as plain text where its quote was.
+def _map_offset(at: int, fresh_sites: list[dict], shifts: list[tuple[int, int]]) -> list[int]:
+    """Candidate positions in the current stream for baseline offset `at`.
 
-    The outcome when the author accepted the suggestion between our typing and
-    the read-back: the tracked change is gone, and the document simply reads as
-    edited. Used only once no tracked change matched, and confirmed by three
-    tests on the live stream, smart quotes folded on both sides:
+    Two kinds of change move text after them. Our own replacements that landed
+    as plain text (`shifts`, as (baseline offset, net length change)) are in
+    baseline coordinates and applied first. Pending tracked changes
+    (`fresh_sites`) are in current coordinates — inserted text counts, deleted
+    text does not — and are applied in document order while they end at or
+    before the moving position. A site that *touches* the position cannot be
+    told, from its offset alone, to be before or after the quote, so both
+    readings are returned and the caller tries each; the check that follows is
+    exact enough that a wrong reading fails rather than passes.
+    """
+    mapped = at
+    for off, delta in shifts:
+        if off < at:
+            mapped += delta
+    candidates = [mapped]
+    for s in sorted(fresh_sites, key=lambda s: s["offset"]):
+        delta = len(s["inserted"]) - len(s["deleted"])
+        s_end = s["offset"] + len(s["inserted"])
+        moved = []
+        for m in candidates:
+            if s_end < m:
+                moved.append(m + delta)
+            elif s["offset"] <= m <= s_end:
+                moved.extend((m, m + delta))
+            else:
+                moved.append(m)
+        candidates = sorted(set(moved))
+    return candidates
 
-    * the quote's surroundings in the baseline, with the replacement where the
-      quote was, occur exactly once in the stream;
-    * the same surroundings with the quote itself do not (after the edited copy
-      is removed — the replacement may contain the quote, as a widening does);
-    * no tracked change beyond the baseline overlaps the replacement, since text
-      inside a pending insertion is not plain text.
 
-    The surroundings shrink down a ladder because neighbouring suggestions —
-    ours, typed earlier in the batch, or the author's — legitimately change them.
+def _landed(
+    r: Result, at: int, stream: str, baseline: str, fresh_sites: list[dict],
+    shifts: list[tuple[int, int]],
+) -> bool:
+    """Whether `r`'s replacement now sits as plain text exactly where its quote was.
 
-    Every rung counts against the baseline, not just for presence: the edited
-    text must occur exactly one time *more* in the stream than it did in the
-    baseline, and the original exactly one time fewer. Presence alone was
-    fooled by an echo — a second passage with the same surroundings already
-    holding the replacement — whenever the original had also been touched by
-    a neighbouring edit, and would have reported an untyped suggestion as
-    accepted. "One more than before" is evidence that this location changed.
+    Position, not counts: the quote's unique baseline offset is mapped into the
+    current stream (`_map_offset`), and the stream there must start with the
+    replacement and no longer start with the quote — with smart quotes folded
+    on both sides. Counting occurrences of "surroundings plus replacement" was
+    fooled by look-alike passages whenever pending edits elsewhere shifted the
+    counts, and refused a genuine shortening whose quote contained its
+    replacement; a position is indifferent to both.
+
+    "No longer the quote" is read against the quote's own tail where the
+    replacement begins with the quote (a widening), since the quote is then
+    present at the offset either way and only what follows it differs. No
+    pending tracked change may overlap the replacement: text inside an
+    insertion is not plain text.
     """
     quote, repl = _want_key(r)
-    stream, baseline = fold_quotes(stream), fold_quotes(baseline)
-    if baseline.count(quote) == 1:
-        at = baseline.index(quote)
-        ladder = _CONTEXT_LADDER
-    else:
-        at = None
-        ladder = (0,)
-    for k in ladder:
-        if k == 0:
-            pre = post = ""
-        else:
-            pre = baseline[max(0, at - k):at]
-            post = baseline[at + len(quote):at + len(quote) + k]
-        edited = pre + repl + post
-        original = pre + quote + post
-        if stream.count(edited) != baseline.count(edited) + 1:
+    stream = fold_quotes(stream)
+    baseline_tail = None
+    if repl.startswith(quote):
+        after = at + len(quote)
+        baseline_tail = quote + fold_quotes(baseline)[after:after + 16]
+    for mapped in _map_offset(at, fresh_sites, shifts):
+        if mapped < 0 or not stream.startswith(repl, mapped):
             continue
-        # The original may sit inside the edited text (a widening keeps the
-        # quote), so it is counted with every edited copy blanked out first.
-        was = baseline.replace(edited, "").count(original)
-        if stream.replace(edited, "").count(original) != was - 1:
-            return False
-        # Which occurrence is the new one cannot be told from text alone when
-        # the baseline already had some, so every occurrence must be clear of
-        # pending changes: text inside an insertion is not plain text.
-        pos = -1
-        while (pos := stream.find(edited, pos + 1)) != -1:
-            start = pos + len(pre)
-            end = start + len(repl)
-            for s in fresh_sites:
-                s_start = s["offset"]
-                s_end = s_start + len(s["inserted"])
-                inside = start < s_start < end  # a pure deletion sitting inside it
-                if (s_start < end and s_end > start) or inside:
-                    return False
-        # A pending insertion carrying the replacement anywhere means the
-        # replacement we can see may be that one, not plain text. The overlap
-        # test above is the precise form; this is the belt to its braces, and
-        # it only ever refuses.
-        if any(repl in fold_quotes(s["inserted"]) for s in fresh_sites):
-            return False
-        return True
+        if baseline_tail is not None:
+            if stream.startswith(baseline_tail, mapped):
+                continue
+        elif stream.startswith(quote, mapped):
+            continue
+        end = mapped + len(repl)
+        clear = True
+        for s in fresh_sites:
+            s_start = s["offset"]
+            s_end = s_start + len(s["inserted"])
+            inside = mapped < s_start < end  # a pure deletion sitting inside it
+            if (s_start < end and s_end > mapped) or inside:
+                clear = False
+                break
+        if clear:
+            return True
     return False
+
+
+def _outcomes(want: list[Result], stream: str, fresh_sites: list[dict], baseline: str) -> dict:
+    """Classify every provisionally-typed result against one export, top-down.
+
+    Returns {id(result): (kind, detail)} with kind one of 'tracked' (an exact
+    site, consumed so two identical suggestions need two sites), 'mismatch' (a
+    site containing the halves; detail is the site), 'plain' (the replacement
+    landed as plain text where the quote was) or 'missing'. Document order
+    matters: a replacement that landed as plain text shifts every offset after
+    it, and only results already classified can be counted, so results are
+    taken top-down whatever order they were typed in.
+    """
+    fresh = Counter(_site_key(s) for s in fresh_sites)
+    positions = {id(r): _baseline_offset(baseline, r) for r in want}
+    ordered = sorted(want, key=lambda r: (positions[id(r)] is None, positions[id(r)] or 0))
+    shifts: list[tuple[int, int]] = []
+    out: dict = {}
+    for r in ordered:
+        key = _want_key(r)
+        if fresh[key] > 0:
+            fresh[key] -= 1
+            out[id(r)] = ("tracked", None)
+            continue
+        near = _tracked_near(r, fresh_sites)
+        if near is not None:
+            out[id(r)] = ("mismatch", near)
+            continue
+        at = positions[id(r)]
+        if at is not None and _landed(r, at, stream, baseline, fresh_sites, shifts):
+            quote, repl = key
+            shifts.append((at, len(repl) - len(quote)))
+            out[id(r)] = ("plain", None)
+            continue
+        out[id(r)] = ("missing", None)
+    return out
+
+
+def _unverified(r: Result) -> None:
+    """The third outcome: landed as plain text, which nothing can vouch for."""
+    r.ok = False
+    r.error = None
+    r.unverified = True
+    r.anchored = r.quote
+    r.status = (
+        "unverified: replacement present as plain text, nothing tracked; the "
+        "author may have accepted it, or it was a real edit; check the document"
+    )
 
 
 def _tracked_near(r: Result, fresh_sites: list[dict]) -> dict | None:
@@ -604,38 +670,34 @@ def _tracked_near(r: Result, fresh_sites: list[dict]) -> dict | None:
 
 
 def _canary(
-    r: Result, read_state, before: Counter, baseline_stream: str, mode_ok: bool
+    r: Result, read_state, before: Counter, baseline_stream: str, landed: list[Result]
 ) -> str:
     """Classify what a typed suggestion actually did, from one fresh export.
 
-    Five answers. 'suggested': a tracked change with our exact halves exists.
+    Four answers. 'suggested': a tracked change with our exact halves exists.
     'tracked': a tracked change *contains* our halves — the keystrokes were
-    tracked, as a different edit that verification will report. 'accepted': no
-    tracked change, the replacement is plain text where the quote was, and the
-    editor read "suggesting" after typing — the author accepted it before we
-    could look. 'untracked': the same document, but the post-typing probe did
-    not read "suggesting" (another mode, or unreadable) — either the author
-    accepted it or the typing was a real edit, and nothing here can tell which.
-    'unknown': the export shows neither yet; it lags, so absence is not
-    evidence of anything.
+    tracked, as a different edit that verification will report. 'plain': no
+    tracked change, and the replacement is plain text where the quote was —
+    what the author accepting it leaves behind, and what a real edit leaves
+    behind, indistinguishably. 'unknown': the export shows neither yet; it
+    lags, so absence is not evidence of anything.
 
-    An accepted suggestion and a real edit leave the same document behind, and
-    the mode probe is the only cheap evidence there is — an observation of the
-    editor *after* the fact, not a record of what the keystrokes did. So no
-    verdict here is grounds for an undo: undoing an acceptance deletes the
-    author's own text. 'untracked' stops the batch and is reported; it is never
-    reverted.
+    The caller reads 'plain' with the post-typing mode probe: an observation of
+    the editor afterwards, not a record of what the keystrokes did. Nothing here
+    is grounds for an undo — undoing an acceptance deletes the author's text.
+    `landed` carries the results already known to be plain text, whose length
+    changes move everything after them.
     """
     for wait in (1.5, 4.0):
         stream, sites = read_state()
         fresh_sites = _fresh_sites(sites, before)
-        fresh = Counter(_site_key(s) for s in fresh_sites)
-        if _want_key(r) in fresh:
+        kind, _ = _outcomes(landed + [r], stream, fresh_sites, baseline_stream)[id(r)]
+        if kind == "tracked":
             return "suggested"
-        if _tracked_near(r, fresh_sites) is not None:
+        if kind == "mismatch":
             return "tracked"
-        if _accepted(r, stream, baseline_stream, fresh_sites):
-            return "accepted" if mode_ok else "untracked"
+        if kind == "plain":
+            return "plain"
         time.sleep(wait)
     return "unknown"
 
@@ -739,6 +801,7 @@ def post_suggestions(
         return run
 
     aborted = None
+    landed: list[Result] = []
     try:
         first_typed = True
         for _, quote, replacement in ordered:
@@ -761,13 +824,13 @@ def post_suggestions(
             # whose post-typing mode probe stopped reading "suggesting" — the one
             # cheap signal that the keystrokes may not have been tracked.
             first_typed = False
-            verdict = _canary(r, read_state, before, baseline_stream, mode_ok)
+            verdict = _canary(r, read_state, before, baseline_stream, landed)
             if verdict == "suggested":
                 # Confirmed now; recorded now. Waiting for the verification pass
                 # left a run killed while later items typed with no row for it.
                 r.anchored = r.quote
                 record_once(r)
-            elif verdict == "untracked":
+            elif verdict == "plain" and not mode_ok:
                 # Plain text, nothing tracked, and the editor could not be
                 # confirmed in suggesting mode after typing. An acceptance and a
                 # real edit look the same from here, so this is reported and the
@@ -776,12 +839,14 @@ def post_suggestions(
                 r.ok = False
                 r.error = _untracked_error(r) + " Run stopped before any further typing."
                 aborted = "an earlier suggestion is plain text with nothing tracking it"
-            elif verdict == "accepted":
-                run.notes.append(
-                    f"the suggestion on {quote[:40]!r} was accepted before it could "
-                    "be read back; a real edit would leave the same document, so "
-                    "this rests on the editor reading suggesting mode after typing"
-                )
+            elif verdict == "plain":
+                # The same document with the mode confirmed: the batch is not
+                # known to be broken, so it goes on, but nothing can vouch for
+                # this item. Recorded now, so the ledger knows it whatever
+                # happens next.
+                _unverified(r)
+                landed.append(r)
+                record_once(r)
             if aborted is None and not mode_ok:
                 # 'unknown', 'suggested' or 'tracked' with a mode probe that no
                 # longer reads suggesting. A tracked change proves this item, but
@@ -824,16 +889,15 @@ def verify_suggestions(
     a typed straight apostrophe as a curly one and a byte-for-byte match reported
     correct suggestions as failures.
 
-    A suggestion with no tracked change is not yet a failure: the author may have
-    accepted it between our typing and this read, which removes the tracked change
-    and leaves the replacement as plain text where the quote was. `_accepted`
-    tests for exactly that against `baseline_stream`, and a match is the second ok
-    state, `accepted` — but only for a result whose post-typing mode probe read
-    "suggesting". A real edit leaves the same text, and the probe is the only
-    evidence separating the two; without it the same picture is the hard failure
-    `_untracked_error` describes, naming the text the operator must check. Neither
-    a matching tracked change nor the accepted text is the hard failure it always
-    was.
+    A suggestion with no tracked change whose replacement sits as plain text where
+    the quote was (`_landed`, position-based against `baseline_stream`) is the
+    third outcome, `unverified`: the author may have accepted it between our
+    typing and this read, or the typing may have been a real edit, and nothing
+    read back can say which. It is not ok and it is not the hard failure; it is
+    reported with the text to check and recorded in the ledger. Where the
+    post-typing mode probe did not read "suggesting" the same picture *is* the
+    hard failure `_untracked_error` describes. Neither a tracked change nor plain
+    text where the quote was is still "typed suggestion could not be read back".
 
     `record(result)` is called per suggestion as it verifies, for the reason given
     in `verify`.
@@ -841,48 +905,40 @@ def verify_suggestions(
     want = [r for r in run.results if r.ok]
     stream, sites = "", []
     fresh_sites: list[dict] = []
-
-    def settled(r: Result, fresh: Counter) -> bool:
-        return fresh[_want_key(r)] > 0 or _accepted(r, stream, baseline_stream, fresh_sites)
+    outcomes: dict = {}
 
     for wait in (1.5, 4.0, 8.0):
         stream, sites = read_state()
         fresh_sites = _fresh_sites(sites, before)
-        fresh = Counter(_site_key(s) for s in fresh_sites)
-        if all(settled(r, fresh) for r in want):
+        outcomes = _outcomes(want, stream, fresh_sites, baseline_stream)
+        if all(kind != "missing" for kind, _ in outcomes.values()):
             break
         time.sleep(wait)
 
-    fresh = Counter(_site_key(s) for s in fresh_sites)
     for r in want:
-        key = _want_key(r)
-        if fresh[key] > 0:
-            fresh[key] -= 1
+        kind, detail = outcomes[id(r)]
+        if kind == "tracked":
             r.anchored = r.quote
             if record is not None:
                 record(r)
-            continue
-        near = _tracked_near(r, fresh_sites)
-        if near is not None:
+        elif kind == "mismatch":
             r.ok = False
-            r.anchored = near["deleted"]
+            r.anchored = detail["deleted"]
             r.error = (
                 "the tracked change does not match the suggestion exactly "
-                f"(deleted {near['deleted'][:60]!r}); it is live and should be checked"
+                f"(deleted {detail['deleted'][:60]!r}); it is live and should be checked"
             )
-            continue
-        if _accepted(r, stream, baseline_stream, fresh_sites):
+        elif kind == "plain":
             if r.mode_after != "suggesting":
                 r.ok = False
                 r.error = _untracked_error(r)
                 continue
-            r.accepted = True
-            r.anchored = r.quote
+            _unverified(r)
             if record is not None:
                 record(r)
-            continue
-        r.ok = False
-        r.error = "typed suggestion could not be read back"
+        else:
+            r.ok = False
+            r.error = "typed suggestion could not be read back"
     return run
 
 

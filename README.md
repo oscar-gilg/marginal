@@ -166,12 +166,15 @@ editing pass. Deletions are expressed as a wider replacement that omits the text
 Suggestions post after every comment, bottom of the document first, so no anchor
 is ever navigated across an edit already made. Each one is verified by reading
 the document's tracked changes back from the docx export — exact halves or a
-loud failure. Two things that are not failures: a suggestion the author accepted
-before it could be read back (the replacement is plain text where the quote was,
-and the quote is gone) verifies as `accepted`, and halves are compared with
-smart and straight quotes folded, because Docs stores a typed `document's` as
-`document’s`. They share the comment budget, and both modes are offered the
-capability in the same words, through the brief.
+loud failure. Halves are compared with smart and straight quotes folded, because
+Docs stores a typed `document's` as `document’s`. There is a third outcome,
+`unverified`: the replacement sits as plain text exactly where the quote was and
+nothing tracks it, which is what the author accepting the suggestion before it
+could be read back leaves behind — and also what a real edit leaves behind.
+Nothing read back can tell the two apart, so it is neither counted as posted nor
+reported as failed: it is listed with the text to check, recorded in the ledger,
+and keeps the exit code non-zero. They share the comment budget, and both modes
+are offered the capability in the same words, through the brief.
 
 The editor mode is probed immediately before and immediately after every typed
 suggestion, and the first one is also read back from an export before any more

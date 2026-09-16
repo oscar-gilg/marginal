@@ -35,8 +35,11 @@ def _state(stream=DOC, sites=()):
     return lambda: (stream, [dict(s) for s in sites])
 
 
-def site(deleted, inserted):
-    return {"deleted": deleted, "inserted": inserted, "offset": 0}
+def site(deleted, inserted, stream=None):
+    """A tracked change. Its offset indexes the live stream, so a state that
+    also classifies plain-text landings must pass the stream it built."""
+    offset = stream.index(inserted) if stream is not None and inserted in stream else 0
+    return {"deleted": deleted, "inserted": inserted, "offset": offset}
 
 
 def _post(monkeypatch, pairs, *, typed=None, state=None, mode_ok=True,
@@ -81,10 +84,10 @@ def _default_state(typed):
     """A document that faithfully records every typed suggestion as tracked."""
 
     def read():
-        sites = [site(q, r) for q, r in typed]
         stream = DOC
         for q, r in typed:
             stream = stream.replace(q, r)
+        sites = [site(q, r, stream) for q, r in typed]
         return stream, sites
 
     return read
@@ -197,7 +200,7 @@ def test_an_untracked_replacement_under_an_unconfirmed_mode_stops_the_batch_with
     assert ("z", META) not in page.keys
     first = next(r for r in run.results if r.quote == "Gamma five")  # bottom-up: typed first
     rest = next(r for r in run.results if r.quote == "Alpha one")
-    assert not first.ok and not first.accepted
+    assert not first.ok and not first.unverified
     assert "REAL EDIT" in first.error and "editing mode" in first.error
     assert "'Gamma five'" in first.error and "'Gamma FIVE'" in first.error
     assert "Nothing was undone" in first.error
@@ -221,24 +224,28 @@ def test_an_unreadable_probe_over_an_accepted_suggestion_is_never_undone(monkeyp
     [r] = run.results
     assert ("z", META) not in page.keys
     assert r.mode_after is None
-    assert not r.ok and not r.accepted
+    assert not r.ok and not r.unverified
     assert "an unreadable mode" in r.error and "Nothing was undone" in r.error
 
 
-def test_the_same_picture_with_the_mode_confirmed_is_an_acceptance(monkeypatch):
-    # The residual risk, pinned on purpose: a real edit followed by a probe that
-    # reads suggesting is indistinguishable from an acceptance and is reported as
-    # one — with the note, and with the "unverified" label in the report — so the
-    # operator knows to look. There is no undo on this path either.
+def test_the_same_picture_with_the_mode_confirmed_is_unverified_and_the_batch_goes_on(monkeypatch):
+    # Codex review round 2, finding 1. A real edit followed by a probe that reads
+    # suggesting is indistinguishable from an acceptance. It used to be reported
+    # as a success; it is now the third outcome — not ok, not a hard failure,
+    # recorded, batch not stopped (the editor is not known to be broken) — and
+    # there is no undo on this path either.
     typed = []
+    rows = []
     run, page, _ = _post(
-        monkeypatch, [("Beta three", "Beta 3")], typed=typed, state=_edited_state(typed),
-        mode_after="suggesting",
+        monkeypatch, [("Alpha one", "Alpha 1"), ("Beta three", "Beta 3")],
+        typed=typed, state=_edited_state(typed), mode_after="suggesting",
+        record=lambda r: rows.append(r.quote),
     )
-    [r] = run.results
-    assert r.ok and r.accepted
+    assert [q for q, _ in typed] == ["Beta three", "Alpha one"], "the batch went on"
+    assert all(_is_unverified(r) for r in run.results)
+    assert run.posted == []
+    assert sorted(rows) == ["Alpha one", "Beta three"]
     assert ("z", META) not in page.keys
-    assert any("rests on the editor reading suggesting mode" in n for n in run.notes)
 
 
 def test_a_verified_suggestion_reports_its_exact_halves(monkeypatch):
@@ -291,14 +298,21 @@ def test_pre_existing_identical_suggestions_are_not_claimed(monkeypatch):
     assert not r.ok and "could not be read back" in r.error
 
 
-# --- accepted before read-back (2026-09-16) ----------------------------------
+# --- landed as plain text before read-back (2026-09-16) ----------------------
 #
 # The author was accepting suggestions in the Doc while the run typed them. A
 # suggestion accepted between typing and verification has no tracked change
 # left to read back — the document simply reads as edited — and was reported as
-# "could not be read back" although it had landed exactly. That is the second ok
-# state, `accepted`; a document showing neither the tracked change nor the
-# accepted text is still the hard failure it was.
+# "could not be read back" although it had landed exactly. A real edit leaves
+# the same document, and nothing read back afterwards can tell the two apart,
+# so this is the third outcome, `unverified`: not ok, not the hard failure,
+# recorded, and reported with the text to check. A document showing neither
+# the tracked change nor the replacement where the quote was is still the hard
+# failure it was.
+
+
+def _is_unverified(r):
+    return r.unverified and not r.ok and r.error is None and "unverified" in r.status
 
 
 def _accepted_state(typed, tracked=()):
@@ -316,22 +330,27 @@ def _accepted_state(typed, tracked=()):
     return read
 
 
-def test_a_suggestion_accepted_before_read_back_is_ok_and_says_accepted(monkeypatch):
+def test_a_suggestion_accepted_before_read_back_is_unverified_not_failed(monkeypatch):
     typed = []
+    rows = []
     run, page, _ = _post(
         monkeypatch, [("Beta three", "Beta 3")], typed=typed, state=_accepted_state(typed),
+        record=lambda r: rows.append(r.quote),
     )
     [r] = run.results
-    assert r.ok and r.accepted and r.error is None
+    assert _is_unverified(r)
     assert r.anchored == "Beta three"
-    assert ("z", META) not in page.keys, "an accepted suggestion must not be undone"
-    assert any("accepted before it could be read back" in n for n in run.notes)
+    assert "check the document" in r.status
+    assert ("z", META) not in page.keys, "an acceptance must never be undone"
+    assert rows == ["Beta three"], "recorded, so the ledger knows it"
+    assert run.posted == []
 
 
-def test_an_accepted_first_suggestion_does_not_abort_the_batch(monkeypatch):
+def test_an_unverified_first_suggestion_does_not_abort_the_batch(monkeypatch):
     # The canary used to read "replacement present, nothing tracked" as a real
-    # edit and undo it. With the mode probe reading suggesting after typing, that
-    # picture is an acceptance, and the rest of the batch still types.
+    # edit and undo it. With the mode probe reading suggesting after typing, the
+    # batch is not known to be broken, so the rest still types; the item itself
+    # is unverified, not a success.
     typed = []
     run, page, _ = _post(
         monkeypatch,
@@ -340,24 +359,46 @@ def test_an_accepted_first_suggestion_does_not_abort_the_batch(monkeypatch):
     )
     assert [q for q, _ in typed] == ["Gamma five", "Alpha one"]
     by_quote = {r.quote: r for r in run.results}
-    assert by_quote["Gamma five"].ok and by_quote["Gamma five"].accepted
-    assert by_quote["Alpha one"].ok and not by_quote["Alpha one"].accepted
+    assert _is_unverified(by_quote["Gamma five"])
+    assert by_quote["Alpha one"].ok and not by_quote["Alpha one"].unverified
     assert ("z", META) not in page.keys
 
 
-def test_a_widening_replacement_can_be_accepted(monkeypatch):
+def test_a_widening_replacement_can_land_as_plain_text(monkeypatch):
     # The replacement contains the quote, so "the quote is gone" cannot be read
-    # literally: the check is on the quote in its surroundings.
+    # literally: what follows the quote is what changed.
     typed = []
     run, _, _ = _post(
         monkeypatch, [("Beta three", "Beta three and a half")],
         typed=typed, state=_accepted_state(typed),
     )
     [r] = run.results
-    assert r.ok and r.accepted
+    assert _is_unverified(r)
 
 
-def test_the_replacement_elsewhere_with_the_quote_intact_is_not_accepted(monkeypatch):
+def test_a_shortening_whose_quote_contains_the_replacement_lands(monkeypatch):
+    # Codex review round 2, finding 4: "the the answer." with quote "the answer"
+    # and replacement "answer". A count of occurrences refused this; a position
+    # does not.
+    doc = "Say the the answer.\n"
+    tab = {"id": "t.0", "text": doc, "paragraphs": []}
+    _quiet(monkeypatch)
+    monkeypatch.setattr(post, "set_mode", lambda page, mode: "editing")
+    monkeypatch.setattr(post, "editor_mode", lambda page, timeout=5.0: "suggesting")
+    typed = []
+    monkeypatch.setattr(
+        post, "suggest_edit",
+        lambda page, span, replacement, *a, **k: typed.append((span.quote, replacement)) or 3,
+    )
+    run = post.post_suggestions(
+        FakePage(), "doc", tab, [("the answer", "answer")], port=0,
+        read_state=lambda: ("Say the answer.\n" if typed else doc, []),
+    )
+    [r] = run.results
+    assert _is_unverified(r)
+
+
+def test_the_replacement_elsewhere_with_the_quote_intact_did_not_land(monkeypatch):
     # The replacement text appearing somewhere else in the document, while the
     # quote still sits where it was, is not our edit landing.
     def state():
@@ -365,11 +406,11 @@ def test_the_replacement_elsewhere_with_the_quote_intact_is_not_accepted(monkeyp
 
     run, _, _ = _post(monkeypatch, [("Beta three", "Beta 3")], state=state)
     [r] = run.results
-    assert not r.ok and not r.accepted
+    assert not r.ok and not r.unverified
     assert r.error == "typed suggestion could not be read back"
 
 
-def test_text_inside_a_pending_insertion_is_not_accepted_text(monkeypatch):
+def test_text_inside_a_pending_insertion_is_not_plain_text(monkeypatch):
     # A fresh tracked change covering the region — with halves that are not ours
     # — means the replacement we can see is that insertion, not plain text.
     typed = []
@@ -382,25 +423,29 @@ def test_text_inside_a_pending_insertion_is_not_accepted_text(monkeypatch):
 
     run, _, _ = _post(monkeypatch, [("Beta three", "Beta 3")], typed=typed, state=state)
     [r] = run.results
-    assert not r.ok and not r.accepted
+    assert not r.ok and not r.unverified
 
 
-def test_neither_tracked_nor_accepted_is_still_the_hard_failure(monkeypatch):
+def test_neither_tracked_nor_landed_is_still_the_hard_failure(monkeypatch):
     run, _, _ = _post(monkeypatch, [("Beta three", "Beta 3")], state=_state(sites=[]))
     [r] = run.results
-    assert not r.ok and not r.accepted
+    assert not r.ok and not r.unverified
     assert r.error == "typed suggestion could not be read back"
 
 
-def test_the_accepted_text_is_reported_as_accepted_not_suggested(capsys):
+def test_an_unverified_suggestion_is_counted_and_listed_apart(capsys):
     from marginal import cli
 
     run = post.Run(doc_id="d", tab_id="t", strategy="paragraph")
     run.results = [post.Result(quote="q", body="", ok=True, kind="suggestion",
-                               replacement="better", accepted=True)]
-    assert cli._report(run, [], []) == 0
+                               replacement="better"),
+                   post.Result(quote="p", body="", ok=True, kind="suggestion",
+                               replacement="other")]
+    post._unverified(run.results[1])
+    assert cli._report(run, [], []) == 1, "an unverified item keeps the exit code non-zero"
     out = capsys.readouterr().out
-    assert "accepted (unverified" in out and "→ better" in out
+    assert "posted 1/2, 1 unverified" in out
+    assert "? " in out and "→ other" in out and "check the document" in out
 
 
 # --- smart punctuation (2026-09-16) -------------------------------------------
@@ -422,7 +467,7 @@ def test_a_tracked_change_with_a_smart_apostrophe_matches_its_straight_one(monke
         monkeypatch, [("Beta three", "the document's Beta 3")], typed=typed, state=state,
     )
     [r] = run.results
-    assert r.ok and not r.accepted
+    assert r.ok and not r.unverified
     assert r.replacement == "the document's Beta 3", "the result keeps what was typed"
 
 
@@ -438,20 +483,20 @@ def test_smart_double_quotes_fold_too(monkeypatch):
     assert r.ok
 
 
-def test_the_accepted_text_is_matched_with_quotes_folded(monkeypatch):
+def test_plain_text_is_matched_with_quotes_folded(monkeypatch):
     typed = []
 
     def state():
         stream = DOC
         for q, r in typed:
-            stream = stream.replace(q, r.replace("'", "’"))
+            stream = stream.replace(q, r.replace("'", "\u2019"))
         return stream, []
 
     run, _, _ = _post(
         monkeypatch, [("Beta three", "Beta's 3")], typed=typed, state=state,
     )
     [r] = run.results
-    assert r.ok and r.accepted
+    assert _is_unverified(r)
 
 
 def test_a_pre_existing_site_that_differs_only_by_quote_style_is_still_baseline(monkeypatch):
@@ -480,15 +525,15 @@ def test_each_suggestion_is_recorded_as_it_verifies_and_failures_are_not(monkeyp
         monkeypatch,
         [("Alpha one", "Alpha 1"), ("Beta three", "Beta 3"), ("Gamma five", "Gamma 5")],
         typed=typed,
-        # Alpha tracked, Gamma accepted, Beta lost.
+        # Alpha tracked, Gamma landed as plain text, Beta lost.
         state=lambda: (
             DOC.replace("Alpha one", "Alpha 1").replace("Gamma five", "Gamma 5"),
             [site("Alpha one", "Alpha 1")],
         ) if typed else (DOC, []),
-        record=lambda r: rows.append((r.quote, r.accepted)),
+        record=lambda r: rows.append((r.quote, r.unverified)),
     )
     by_quote = {r.quote: r for r in run.results}
-    assert by_quote["Alpha one"].ok and by_quote["Gamma five"].accepted
+    assert by_quote["Alpha one"].ok and _is_unverified(by_quote["Gamma five"])
     assert not by_quote["Beta three"].ok
     assert sorted(rows) == [("Alpha one", False), ("Gamma five", True)]
 
@@ -549,8 +594,9 @@ def test_an_untracked_replacement_on_a_later_item_stops_the_batch(monkeypatch):
         sites = []
         for q, r in typed:
             stream = stream.replace(q, r)
+        for q, r in typed:
             if q == "Gamma five":
-                sites.append(site(q, r))
+                sites.append(site(q, r, stream))
         return stream, sites
 
     run, page, _ = _post(
@@ -592,7 +638,7 @@ def test_a_lagging_canary_cannot_turn_an_unconfirmed_mode_into_an_acceptance(mon
     by_quote = {r.quote: r for r in run.results}
     assert len(typed) == 1  # the batch stopped after the first item
     first = by_quote["Beta three"]
-    assert not first.ok and not first.accepted
+    assert not first.ok and not first.unverified
     assert "editing mode" in first.error and "REAL EDIT" in first.error
     assert by_quote["Alpha one"].error.startswith("not attempted")
     assert rows == [] and ("z", META) not in page.keys
@@ -661,18 +707,76 @@ def test_a_suggestion_recorded_at_the_canary_is_not_recorded_again(monkeypatch):
 # --- an echo of the replacement elsewhere is not evidence (Codex finding 3) --
 
 
-def test_an_echo_passage_with_the_same_surroundings_does_not_verify_an_untyped_edit():
-    # Two passages with identical surroundings; one already holds the replacement.
-    # The author touches the original's tail, our typing never lands. Presence of
-    # "surroundings + replacement" is then true on the strength of the echo alone;
-    # only "one more than the baseline had" says this location changed.
-    from marginal.post import Result, _accepted
+def _classify(baseline, stream, sites, pairs):
+    """Run the verification classifier over (quote, replacement) pairs."""
+    from marginal.post import Result, _outcomes
 
-    pad = "\n" * 7
-    baseline = pad + "aa Beta 3 zz\n" + pad + "aa Beta three zz\n"
-    stream = pad + "aa Beta 3 zz\n" + pad + "aa Beta three ZZ\n"
-    r = Result(quote="Beta three", body="", ok=True, kind="suggestion", replacement="Beta 3")
-    assert not _accepted(r, stream, baseline, [])
-    # And the genuine acceptance, echo and all, still verifies.
-    landed = pad + "aa Beta 3 zz\n" + pad + "aa Beta 3 zz\n"
-    assert _accepted(r, landed, baseline, [])
+    results = [Result(quote=q, body="", ok=True, kind="suggestion", replacement=r)
+               for q, r in pairs]
+    out = _outcomes(results, stream, sites, baseline)
+    return [out[id(r)][0] for r in results]
+
+
+PAD = "\n" * 7
+
+
+def test_pending_edits_elsewhere_cannot_make_an_untouched_quote_look_landed():
+    # Codex review round 2, finding 2. Two look-alike passages; pending zz→ZZ in
+    # the first and ZZ→zz in the second flip every contextual count while
+    # "Beta three" sits untouched. A count-based check verified it; a position
+    # does not.
+    baseline = PAD + "aa Beta 3 zz.\n" + PAD + "aa Beta three ZZ.\n"
+    stream = PAD + "aa Beta 3 ZZ.\n" + PAD + "aa Beta three zz.\n"
+    sites = [
+        {"deleted": "zz", "inserted": "ZZ", "offset": stream.index("ZZ")},
+        {"deleted": "ZZ", "inserted": "zz", "offset": stream.index("zz")},
+    ]
+    assert _classify(baseline, stream, sites, [("Beta three", "Beta 3")]) == ["missing"]
+
+
+def test_a_genuine_landing_in_the_same_document_is_seen():
+    baseline = PAD + "aa Beta 3 zz.\n" + PAD + "aa Beta three ZZ.\n"
+    stream = PAD + "aa Beta 3 ZZ.\n" + PAD + "aa Beta 3 zz.\n"
+    sites = [
+        {"deleted": "zz", "inserted": "ZZ", "offset": stream.index("ZZ")},
+        {"deleted": "ZZ", "inserted": "zz", "offset": stream.rindex("zz")},
+    ]
+    assert _classify(baseline, stream, sites, [("Beta three", "Beta 3")]) == ["plain"]
+
+
+def test_a_shortening_whose_quote_contains_the_replacement_is_seen():
+    # Finding 4, at the classifier: "the the answer." → "the answer.".
+    pairs = [("the answer", "answer")]
+    assert _classify("the the answer.\n", "the answer.\n", [], pairs) == ["plain"]
+    # And the untouched document is not mistaken for it.
+    assert _classify("the the answer.\n", "the the answer.\n", [], pairs) == ["missing"]
+
+
+def test_offsets_are_mapped_across_pending_sites_and_earlier_landings():
+    # A pending insertion and a pending deletion before the quote, plus one of
+    # our own replacements that landed as plain text above it, all move it.
+    baseline = "Say Alpha one two.\nSay gone Beta three four.\n"
+    stream = "Say NEW Alpha 1 two.\nSay Beta 3 four.\n"
+    sites = [
+        {"deleted": "", "inserted": "NEW ", "offset": stream.index("NEW ")},
+        {"deleted": "gone ", "inserted": "", "offset": stream.index("Beta")},
+    ]
+    pairs = [("Beta three", "Beta 3"), ("Alpha one", "Alpha 1")]
+    assert _classify(baseline, stream, sites, pairs) == ["plain", "plain"]
+
+
+def test_a_pending_insertion_touching_the_quote_start_is_read_both_ways():
+    # From its offset alone, an insertion ending exactly where the quote begins
+    # could sit before or after it; the check tries both and only an exact match
+    # passes.
+    baseline = "Say Beta three four.\n"
+    sites = [{"deleted": "", "inserted": "very ", "offset": 4}]
+    pairs = [("Beta three", "Beta 3")]
+    assert _classify(baseline, "Say very Beta 3 four.\n", sites, pairs) == ["plain"]
+    assert _classify(baseline, "Say very Beta three four.\n", sites, pairs) == ["missing"]
+
+
+def test_a_quote_that_is_not_unique_in_the_baseline_cannot_be_positioned():
+    baseline = "Beta three. Beta three.\n"
+    pairs = [("Beta three", "Beta 3")]
+    assert _classify(baseline, "Beta 3. Beta three.\n", [], pairs) == ["missing"]

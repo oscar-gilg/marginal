@@ -322,20 +322,21 @@ def _report(run, pairs, notes, ceiling: int = 80) -> int:
         return 0
     for note in getattr(run, "notes", []):
         print(f"  {note}")
-    print(f"\nposted {len(run.posted)}/{max(len(pairs), len(run.results))}")
+    # An unverified suggestion is neither posted nor failed: its replacement is
+    # plain text with nothing tracking it, which is what an acceptance and a real
+    # edit both leave behind. Counted apart, listed apart, and it keeps the exit
+    # code non-zero so the operator looks.
+    unverified = [r for r in run.results if getattr(r, "unverified", False)]
+    total = max(len(pairs), len(run.results))
+    print(f"\nposted {len(run.posted)}/{total}"
+          + (f", {len(unverified)} unverified" if unverified else ""))
     for r in run.results:
-        mark = "✓" if r.ok else "✗"
+        mark = "?" if getattr(r, "unverified", False) else "✓" if r.ok else "✗"
         if r.kind == "suggestion":
-            # An accepted suggestion is ok, and says so — with its caveat: the
-            # author took it before it could be read back, so there is no tracked
-            # change left to check, and a real edit would read the same. The label
-            # names that so the operator knows which lines to look at.
-            how = (
-                "accepted (unverified: the author took it before read-back; a real "
-                "edit would read the same)"
-                if getattr(r, "accepted", False) else "suggested"
-            )
-            print(f"  {mark} {r.post_seconds:5.2f}s {how} on {r.quote[:45]!r}")
+            print(f"  {mark} {r.post_seconds:5.2f}s suggested on {r.quote[:45]!r}")
+            if getattr(r, "unverified", False):
+                print(f"      → {r.replacement[:100]}\n      {r.status}")
+                continue
             print(f"      → {r.replacement[:100] if r.ok else r.error}")
             continue
         print(f"  {mark} {r.post_seconds:5.2f}s on {r.quote[:55]!r}")

@@ -323,14 +323,18 @@ def _post(
             # revision baselines and wrote the "when is there a revision guard"
             # rule in two places ten lines apart.
             fresh_tab=sub.fresh_tab,
+            # Ledgered per comment as verification reads each id back, before the
+            # suggestions below are typed. Recording over the finished run left a
+            # run killed during the suggestion tail with comments live in the
+            # document and absent from the ledger.
+            record=lambda r: sub.record(doc_id, r),
         ) if pairs else Run(doc_id=doc_id, tab_id=tab["id"], strategy=cfg.strategy)
         # After every comment, same rule as the pipeline: suggestions type last.
+        # `place_suggestions` records each one as it verifies.
         if sub.suggestions:
             s_run = sub.place_suggestions(page, tab, doc_id)
             run.results.extend(s_run.results)
             run.notes.extend(s_run.notes)
-    for r in run.posted:
-        sub.record(doc_id, r)
     return run
 
 
@@ -345,12 +349,14 @@ def _edit(quote: str, draft: str, sub) -> tuple[str, str]:
 
 
 def _finish(doc_id: str, cfg: Config, tab: dict, results: list, before: set, reader, sub) -> Run:
-    """Verify every anchor in one pass, then record what actually landed."""
+    """Verify every anchor in one pass, recording each as it is confirmed.
+
+    `results` may already hold verified suggestions; `verify` skips those and
+    `place_suggestions` recorded them itself, so nothing is written twice.
+    """
     run = Run(doc_id=doc_id, tab_id=tab["id"], strategy=cfg.strategy)
     run.results = results
-    post_mod.verify(run, before, reader)
-    for r in run.posted:
-        sub.record(doc_id, r)
+    post_mod.verify(run, before, reader, record=lambda r: sub.record(doc_id, r))
     return run
 
 

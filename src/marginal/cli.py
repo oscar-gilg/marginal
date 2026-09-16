@@ -730,11 +730,15 @@ def _dispatch(a) -> int:
         tab = pick_tab(doc, a.tab)
         page = open_doc(doc_id, tab["id"], port=cfg.port)
         try:
-            run = post_many(page, doc_id, tab, [(a.quote, a.body)], token, cfg.strategy)
+            run = post_many(
+                page, doc_id, tab, [(a.quote, a.body)], token, cfg.strategy,
+                # Recorded as verification reads the id back, not after the run.
+                record=lambda r: ledger.record(
+                    doc_id, r.comment_id, r.quote, r.body, "manual"
+                ),
+            )
         finally:
             page.close()
-        for r in run.posted:
-            ledger.record(doc_id, r.comment_id, r.quote, r.body, "manual")
         print(json.dumps(run.as_dict(), indent=2))
         return 0 if run.posted else 1
 

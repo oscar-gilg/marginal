@@ -166,12 +166,21 @@ editing pass. Deletions are expressed as a wider replacement that omits the text
 Suggestions post after every comment, bottom of the document first, so no anchor
 is ever navigated across an edit already made. Each one is verified by reading
 the document's tracked changes back from the docx export — exact halves or a
-loud failure. They share the comment budget, and both modes are offered the
+loud failure. Two things that are not failures: a suggestion the author accepted
+before it could be read back (the replacement is plain text where the quote was,
+and the quote is gone) verifies as `accepted`, and halves are compared with
+smart and straight quotes folded, because Docs stores a typed `document's` as
+`document’s`. They share the comment budget, and both modes are offered the
 capability in the same words, through the brief.
+
+The editor mode is probed immediately before and immediately after every typed
+suggestion, and the first one is also read back from an export before any more
+are typed; a probe that stops reading Suggesting stops the batch, so one real
+edit is never followed by more.
 
 There is no un-suggest: a suggestion has no Drive id, so withdrawing one is done
 in the Docs UI. The ledger records each with `kind: "suggestion"` for the audit
-trail.
+trail, written as each one verifies rather than at the end of the run.
 
 Two known limits, both of which refuse loudly rather than guess: a suggestion
 may not begin at the very start of a paragraph or line (the editor misplaces a

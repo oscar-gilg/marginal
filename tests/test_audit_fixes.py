@@ -568,3 +568,80 @@ def test_agent_mode_commands_forbid_model_calls_unless_opted_in(monkeypatch, tmp
             pass
         # `forbid(None)` on the way out is the reset, not a guard.
         assert bool([r for r in seen if r]) is expect, (argv, seen)
+
+
+# --- the ledger is written per comment, as each id is read back (2026-09-16) --
+#
+# A run killed after posting left a live comment absent from the ledger, and
+# `unpost` refused to delete it. The ledger was written over the finished run,
+# after the suggestions had also been typed and verified — the slow tail.
+
+
+def test_verify_records_each_comment_the_moment_its_id_is_read_back(monkeypatch):
+    monkeypatch.setattr(post.time, "sleep", lambda *_: None)
+    rows = []
+    run = Run(doc_id="d", tab_id=None, strategy="paragraph")
+    run.results = [
+        Result(quote="p1", body="b1", ok=True),
+        Result(quote="p2", body="b2", ok=True),
+        Result(quote="p3", body="b3", ok=True),
+    ]
+    live = [
+        _comment("c1", "b1", "p1"),
+        _comment("c2", "b2", "WRONG"),  # live, wrongly anchored
+    ]
+    post.verify(run, set(), lambda: live, record=lambda r: rows.append(r.comment_id))
+    ok, wrong, lost = run.results
+    assert ok.ok and wrong.error.startswith("anchor mismatch") and not lost.ok
+    # The wrong one is ours and live: `unpost` needs it in the ledger too.
+    assert rows == ["c1", "c2"]
+
+
+def test_post_batch_ledgers_comments_before_it_types_suggestions(monkeypatch):
+    # The failure as observed: comments posted and verified, then the run killed
+    # during the suggestion tail. Every verified comment must already be a row.
+    from contextlib import contextmanager
+
+    from marginal import ledger, run as runmod, submission
+
+    rows = []
+    monkeypatch.setattr(
+        ledger, "record",
+        lambda doc, cid, quote, body, label, kind="comment", **kw: rows.append((kind, cid)),
+    )
+    @contextmanager
+    def fake_lock(doc_id):
+        yield
+
+    @contextmanager
+    def fake_editor(doc_id, tab_id, cfg):
+        yield object()
+
+    monkeypatch.setattr(runmod, "browser_lock", fake_lock)
+    monkeypatch.setattr(runmod, "editor", fake_editor)
+
+    def fake_post_many(page, doc_id, tab, comments, token, strategy, record=None, **kw):
+        run = Run(doc_id=doc_id, tab_id=tab["id"], strategy=strategy)
+        for quote, body in comments:
+            r = Result(quote=quote, body=body, ok=True, comment_id=f"id-{quote}")
+            run.results.append(r)
+            record(r)  # what `verify` does once the API has the id
+        return run
+
+    monkeypatch.setattr(runmod, "post_many", fake_post_many)
+
+    class Killed(BaseException):
+        pass
+
+    def killed(*a, **k):
+        raise Killed()
+
+    monkeypatch.setattr(runmod.post_mod, "post_suggestions", killed)
+
+    cfg = config_mod.Config(critic=False, suggestions=True)
+    tab = {"id": "t.0", "text": "Alpha one two.\n", "paragraphs": []}
+    sub = submission.Submitter(tab["text"], cfg, "m", budget=5, notes=[])
+    sub.suggestions.append(("one", "1"))
+    with pytest.raises(Killed):
+        runmod._post("d", "tok", cfg, tab, [("Alpha", "a comment")], sub)
+    assert rows == [("comment", "id-Alpha")]

@@ -39,6 +39,38 @@ from .cdp import Page
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
+# Docs rewrites typed straight quotes as smart ones: a replacement typed as
+# `document's` is stored as `document’s`, so a tracked change read back from the
+# export differs from what was typed by one code point and a byte-for-byte match
+# reports a correct suggestion as a failure. The map is one-to-one on purpose —
+# every entry is one character for one character — so folding a stream leaves
+# every offset in it where it was, and comparisons stay in the coordinate space.
+# Only what has been observed live is folded: the single and double quotes. Other
+# automatic substitutions Docs applies to typed *sequences* (`(c)`, fractions,
+# arrows, dashes) are not folded here because none has been seen in a suggestion.
+_QUOTE_FOLD = str.maketrans({
+    "‘": "'",  # ‘ left single
+    "’": "'",  # ’ right single (the apostrophe Docs types)
+    "‚": "'",  # ‚ low single
+    "‛": "'",  # ‛ reversed single
+    "“": '"',  # “ left double
+    "”": '"',  # ” right double
+    "„": '"',  # „ low double
+    "‟": '"',  # ‟ reversed double
+})
+
+
+def fold_quotes(text: str) -> str:
+    """`text` with smart single and double quotes as their straight forms.
+
+    For *comparison* only. The stream itself is never folded — a stream is a
+    coordinate space and its characters are what the caret traverses — but two
+    strings compared through this agree where Docs' smart-quote substitution is
+    the only difference. Length-preserving, so an index into the folded string
+    is the same index into the original.
+    """
+    return text.translate(_QUOTE_FOLD)
+
 # Exports of the same document within one run, kept because each download costs an
 # entry in the browser's download history and a file on disk. Reading the document
 # and taking the pre-post snapshot ask for the same bytes moments apart; verifying

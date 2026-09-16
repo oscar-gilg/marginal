@@ -189,7 +189,7 @@ def test_post_many_builds_the_guard_for_direct_api_callers(monkeypatch):
     original = _tab("a unique quote")
     seen = {}
     monkeypatch.setattr(post, "snapshot", lambda *_: set())
-    monkeypatch.setattr(post, "verify", lambda run, *_: run)
+    monkeypatch.setattr(post, "verify", lambda run, *_, **__: run)
 
     def one(_page, _tab, quote, body, strategy, **kwargs):
         seen.update(kwargs)

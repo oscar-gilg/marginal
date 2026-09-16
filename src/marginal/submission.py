@@ -312,6 +312,10 @@ class Submitter:
         Called once per run, after the last comment has posted: comments never
         navigate a document containing our own edits, and each suggestion only
         shifts offsets in the region already finished.
+
+        Each suggestion is written to the ledger by `post_suggestions` itself, the
+        moment verification confirms it, so a run killed part-way still has a row
+        for everything it typed.
         """
         return post_mod.post_suggestions(
             page,
@@ -321,9 +325,18 @@ class Submitter:
             port=self.cfg.port,
             strategy=self.cfg.strategy,
             fresh_tab=self.fresh_tab,
+            record=lambda r: self.record(doc_id, r),
         )
 
     def record(self, doc_id: str, result) -> None:
+        """One ledger row for a placed comment or suggestion.
+
+        Called by the verification passes per result, as each one is confirmed —
+        not by the caller over the finished run. The ledger used to be written only
+        after every comment and every suggestion had been verified, and a run
+        killed during the slow suggestion tail had posted comments the ledger
+        never heard of, which `unpost` then refused to delete.
+        """
         if getattr(result, "kind", "comment") == "suggestion":
             # A suggestion has no Drive id and no body; the replacement is what
             # was applied, and the row is the only record — there is no un-suggest.

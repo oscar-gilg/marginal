@@ -322,11 +322,21 @@ def _report(run, pairs, notes, ceiling: int = 80) -> int:
         return 0
     for note in getattr(run, "notes", []):
         print(f"  {note}")
-    print(f"\nposted {len(run.posted)}/{max(len(pairs), len(run.results))}")
+    # An unverified suggestion is neither posted nor failed: its replacement is
+    # plain text with nothing tracking it, which is what an acceptance and a real
+    # edit both leave behind. Counted apart, listed apart, and it keeps the exit
+    # code non-zero so the operator looks.
+    unverified = [r for r in run.results if getattr(r, "unverified", False)]
+    total = max(len(pairs), len(run.results))
+    print(f"\nposted {len(run.posted)}/{total}"
+          + (f", {len(unverified)} unverified" if unverified else ""))
     for r in run.results:
-        mark = "✓" if r.ok else "✗"
+        mark = "?" if getattr(r, "unverified", False) else "✓" if r.ok else "✗"
         if r.kind == "suggestion":
             print(f"  {mark} {r.post_seconds:5.2f}s suggested on {r.quote[:45]!r}")
+            if getattr(r, "unverified", False):
+                print(f"      → {r.replacement[:100]}\n      {r.status}")
+                continue
             print(f"      → {r.replacement[:100] if r.ok else r.error}")
             continue
         print(f"  {mark} {r.post_seconds:5.2f}s on {r.quote[:55]!r}")
@@ -727,11 +737,15 @@ def _dispatch(a) -> int:
         tab = pick_tab(doc, a.tab)
         page = open_doc(doc_id, tab["id"], port=cfg.port)
         try:
-            run = post_many(page, doc_id, tab, [(a.quote, a.body)], token, cfg.strategy)
+            run = post_many(
+                page, doc_id, tab, [(a.quote, a.body)], token, cfg.strategy,
+                # Recorded as verification reads the id back, not after the run.
+                record=lambda r: ledger.record(
+                    doc_id, r.comment_id, r.quote, r.body, "manual"
+                ),
+            )
         finally:
             page.close()
-        for r in run.posted:
-            ledger.record(doc_id, r.comment_id, r.quote, r.body, "manual")
         print(json.dumps(run.as_dict(), indent=2))
         return 0 if run.posted else 1
 

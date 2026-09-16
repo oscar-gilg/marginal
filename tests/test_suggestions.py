@@ -127,3 +127,35 @@ def test_a_footnote_body_excludes_suggested_deletions():
         {"textRun": {"content": "Body.\n"}},
     )], fn)
     assert t["footnotes"][0]["text"] == "Kept."
+
+
+# --- smart quotes are folded for comparison, never in the stream -------------
+#
+# Docs stores a typed straight apostrophe as a curly one. The reader reports what
+# the document holds — the stream is a coordinate space and is never rewritten —
+# and `fold_quotes` is what verification compares through.
+
+
+def test_the_reader_reports_the_curly_quote_the_document_holds():
+    blob = docx(para(run("the "), deleted("document"), inserted("document’s"), run(" end.")))
+    [site] = suggestions_from_docx(blob)
+    assert site["inserted"] == "document’s"
+    assert text_from_docx(blob) == "the document’s end.\n"
+
+
+def test_fold_quotes_is_one_character_for_one_character():
+    from marginal.browser_source import fold_quotes
+
+    curly = "‘a’ “b” ‚c‛ „d‟"
+    assert fold_quotes(curly) == "'a' \"b\" 'c' \"d\""
+    assert len(fold_quotes(curly)) == len(curly)
+    assert fold_quotes("plain 'text' \"here\"") == "plain 'text' \"here\""
+
+
+def test_folded_halves_match_a_straight_quoted_replacement():
+    from marginal.browser_source import fold_quotes
+
+    blob = docx(para(run("the "), deleted("document"), inserted("document’s"), run(" end.")))
+    [site] = suggestions_from_docx(blob)
+    assert fold_quotes(site["inserted"]) == "document's"
+    assert fold_quotes(site["inserted"]) != site["inserted"]

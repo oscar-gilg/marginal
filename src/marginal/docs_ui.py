@@ -277,8 +277,19 @@ def suggest_edit(
     expressed by the caller as a wider replacement that omits the text, never as
     an empty replacement.
 
+    Byte-exactly, with one known exception: keypresses go through Docs' automatic
+    substitutions, and a straight quote is stored as a smart one (a replacement
+    typed as `document's` reads back as `document’s`). Verification folds smart
+    and straight quotes before comparing (`browser_source.fold_quotes`) rather
+    than this function pre-substituting, because what Docs will do to any other
+    typed sequence — `(c)`, `1/2`, `-->`, `--`, `>=` — has not been probed, and a
+    guess here would be a wrong-text failure wearing a success face. A character
+    typed as itself (`≥` as U+2265) is one keypress carrying that character and
+    is not known to be rewritten.
+
     Everything before the first typed character is safe to retry; the typing is
-    the terminal act, exactly as submission is for a comment.
+    the terminal act, exactly as submission is for a comment. `post_suggestion_one`
+    probes the mode once more immediately after this returns.
     """
     if not replacement:
         raise ValueError("a suggestion needs a non-empty replacement")

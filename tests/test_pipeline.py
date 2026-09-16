@@ -231,7 +231,7 @@ def test_the_pipeline_posts_every_comment_in_order(monkeypatch):
 
     monkeypatch.setattr(run.post_mod, "post_one", fake_post)
     monkeypatch.setattr(run.post_mod, "snapshot", lambda reader: set())
-    monkeypatch.setattr(run.post_mod, "verify", lambda r, before, reader: r)
+    monkeypatch.setattr(run.post_mod, "verify", lambda r, before, reader, **_: r)
     monkeypatch.setattr(run, "_reader", lambda *a, **k: (lambda: []))
     monkeypatch.setattr(run, "_prior_threads", lambda *a, **k: "")
     # Don't write a real ledger entry for a document that does not exist.
@@ -266,7 +266,7 @@ def _pipeline_run(monkeypatch, schedule, posted):
     monkeypatch.setattr(critic, "tighten", lambda b, a, c, u=None: (b.upper(), "trimmed"))
     monkeypatch.setattr(run, "open_doc", lambda *a, **k: _FakePage())
     monkeypatch.setattr(run.post_mod, "snapshot", lambda reader: set())
-    monkeypatch.setattr(run.post_mod, "verify", lambda r, before, reader: r)
+    monkeypatch.setattr(run.post_mod, "verify", lambda r, before, reader, **_: r)
     monkeypatch.setattr(run, "_reader", lambda *a, **k: (lambda: []))
     monkeypatch.setattr(run, "_prior_threads", lambda *a, **k: "")
     monkeypatch.setattr(ledger, "record", lambda *a, **k: None)

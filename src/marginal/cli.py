@@ -326,7 +326,10 @@ def _report(run, pairs, notes, ceiling: int = 80) -> int:
     for r in run.results:
         mark = "✓" if r.ok else "✗"
         if r.kind == "suggestion":
-            print(f"  {mark} {r.post_seconds:5.2f}s suggested on {r.quote[:45]!r}")
+            # An accepted suggestion is ok, and says so: the author took it before
+            # it could be read back, so there is no tracked change left to check.
+            how = "accepted by the author" if getattr(r, "accepted", False) else "suggested"
+            print(f"  {mark} {r.post_seconds:5.2f}s {how} on {r.quote[:45]!r}")
             print(f"      → {r.replacement[:100] if r.ok else r.error}")
             continue
         print(f"  {mark} {r.post_seconds:5.2f}s on {r.quote[:55]!r}")

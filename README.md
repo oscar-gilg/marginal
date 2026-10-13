@@ -153,6 +153,11 @@ marginal review     <doc-url> --web-search    # API mode, may look things up
 marginal context    <doc-url> --web-search    # agent mode, same instruction
 ```
 
+Editor tabs close after each operation by default, including when posting fails.
+Set `keep_tab = true` to reuse an editor between posts. This trades memory for
+faster posting: `tab_ttl` is checked on the next post, so it does not close tabs
+that are left idle.
+
 ### Suggested edits
 
 `--suggestions` (or `suggestions = true` in the config) lets the commenter also

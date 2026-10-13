@@ -145,13 +145,10 @@ class Config:
     # cheaper model at low effort is the right trade, and it is reached rarely.
     fallback_model: str = "claude-sonnet-5"
     fallback_effort: str = "low"
-    # Keep the document's editor tab open between posts. Every `post-batch` used to
-    # open a fresh tab and wait for Docs to render it — three to five seconds per
-    # comment in agent mode, where each comment is its own process. With this on,
-    # the tab is left open and recorded, and the next post on the same document
-    # re-attaches to it under the same lock. A tab older than `tab_ttl` seconds is
-    # closed and replaced, so an idle profile is not holding the document forever.
-    keep_tab: bool = True
+    # Close editor tabs after use by default so Chrome memory does not accumulate.
+    # Opt in to reuse between post-batch processes with keep_tab = true. tab_ttl
+    # is checked only on the next post; it does not close an idle tab on a timer.
+    keep_tab: bool = False
     tab_ttl: int = 900
     # Ask a model where an unplaceable quote belongs. Off by default: agent mode is
     # the path that needs it and is also the path with no API key, so there the work

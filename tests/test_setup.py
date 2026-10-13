@@ -526,4 +526,4 @@ def test_the_rendered_config_loads(tmp_path, monkeypatch):
     (tmp_path / "marginal.toml").write_text(setup.render({"source": "browser", "headless": True}))
     monkeypatch.chdir(tmp_path)
     cfg = config_mod.load()
-    assert (cfg.source, cfg.headless, cfg.keep_tab, cfg.tab_ttl) == ("browser", True, True, 900)
+    assert (cfg.source, cfg.headless, cfg.keep_tab, cfg.tab_ttl) == ("browser", True, False, 900)

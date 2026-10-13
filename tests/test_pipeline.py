@@ -588,7 +588,7 @@ def test_a_recent_tab_on_the_same_document_tab_is_reused(monkeypatch, tmp_path):
     import time as _t
     held = _HeldPage("T1")
     runmod, opened = _held(monkeypatch, tmp_path, {"target_id": "T1", "tab_id": "t.0", "at": _t.time()}, {"T1": held})
-    with runmod.editor("d", "t.0", _cfg()) as page:
+    with runmod.editor("d", "t.0", _cfg(keep_tab=True)) as page:
         assert page is held
     assert opened == [], "no fresh tab when a live one was recorded"
     assert held.detached and not held.closed, "left open for the next process"
@@ -603,7 +603,7 @@ def test_a_stale_or_foreign_tab_is_closed_and_replaced(monkeypatch, tmp_path):
     ):
         old = _HeldPage("T1")
         runmod, opened = _held(monkeypatch, tmp_path, record, {"T1": old})
-        with runmod.editor("d", "t.0", _cfg()) as page:
+        with runmod.editor("d", "t.0", _cfg(keep_tab=True)) as page:
             assert page.target_id == "NEW"
         assert old.closed, "the tab that was not reused is not leaked"
         assert opened == ["t.0"]
@@ -614,13 +614,27 @@ def test_a_tab_whose_editor_does_not_answer_is_replaced(monkeypatch, tmp_path):
     import time as _t
     dead = _HeldPage("T1", editor=False)
     runmod, opened = _held(monkeypatch, tmp_path, {"target_id": "T1", "tab_id": "t.0", "at": _t.time()}, {"T1": dead})
-    with runmod.editor("d", "t.0", _cfg()) as page:
+    with runmod.editor("d", "t.0", _cfg(keep_tab=True)) as page:
         assert page.target_id == "NEW"
     assert dead.closed and opened == ["t.0"]
 
 
-def test_keep_tab_off_closes_the_tab_and_records_nothing(monkeypatch, tmp_path):
+def test_default_closes_the_tab_and_records_nothing(monkeypatch, tmp_path):
     runmod, opened = _held(monkeypatch, tmp_path)
-    with runmod.editor("d", "t.0", _cfg(keep_tab=False)) as page:
+    with runmod.editor("d", "t.0", _cfg()) as page:
         pass
     assert page.closed and not (tmp_path / "d.tab").exists()
+
+
+@pytest.mark.parametrize("reused", [False, True])
+def test_default_closes_editor_on_failure(monkeypatch, tmp_path, reused):
+    import time as _t
+    held = _HeldPage("T1")
+    record = {"target_id": "T1", "tab_id": "t.0", "at": _t.time()} if reused else None
+    runmod, opened = _held(monkeypatch, tmp_path, record, {"T1": held})
+    with pytest.raises(RuntimeError, match="posting failed"):
+        with runmod.editor("d", "t.0", _cfg()) as page:
+            raise RuntimeError("posting failed")
+    assert page.closed and not page.detached
+    assert not (tmp_path / "d.tab").exists()
+    assert opened == ([] if reused else ["t.0"])

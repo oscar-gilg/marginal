@@ -20,6 +20,9 @@ web_search = false         # let the commenter look things up while it reads
 suggestions = false        # allow suggested edits (tracked changes) as well as comments
 reconcile_anchors = false  # ask a model to place a quote no rule could (a model call)
 
+keep_tab = false          # close editor tabs after use; true opts into reuse
+                           # reused tabs expire only when a later post checks them
+
 [prompts]                  # bump the version rather than editing in place
 commenter = "prompts/commenter-v2.md"
 critique = "prompts/critique-v1.md"
